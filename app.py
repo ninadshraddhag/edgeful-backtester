@@ -1,671 +1,422 @@
 """
-ORB & IB Strategy Backtester
-Opening Range Breakout (configurable duration) + Initial Balance (60-min)
-Instruments: NIFTY 50, BANK NIFTY
+ORB / IB Edge Backtester  +  Permutation Optimizer
+===================================================
+Trades the probability EDGES discovered in the Probability Explorer:
+
+  • First-move-fade   : whichever extreme forms first, the OPPOSITE side
+                        breaks ~75% (IB) / ~85% (ORB)  → fade it
+  • Gap continuation  : Gap Up → reach PDH 77% ,  Gap Down → reach PDL 83%
+  • Plain breakout    : long on range-high break / short on range-low break
+  • + filters: day-of-week, gap type, inside/outside day, first-side, range size
+
+Targets & stops are expressed in × range  (extension / retracement units),
+so 1.0 = one full opening-range width.
+
+The OPTIMIZER sweeps permutations of {side-logic × filters × target × stop}
+and ranks them by expectancy / win-rate / profit-factor, with a min-trade
+guard, to surface the highest-probability configurations.
+
+Data:  C:\\NIFTY 50_minute.csv , C:\\NIFTY BANK_minute.csv  (auto-loaded)
+       analysis/facts.csv  (build_facts.py) — for the day classifications
 """
-
-import warnings
-warnings.filterwarnings("ignore")
-
-import streamlit as st
-import pandas as pd
+import os, itertools
 import numpy as np
+import pandas as pd
+import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
-from datetime import time
 
-st.set_page_config(
-    page_title="ORB & IB Backtester",
-    page_icon="📈",
-    layout="wide",
-)
+st.set_page_config(page_title="ORB/IB Edge Backtester", page_icon="📈", layout="wide")
 
-# ─── constants ────────────────────────────────────────────────────────────────
-MARKET_OPEN  = time(9, 15)
-MARKET_CLOSE = time(15, 15)
-
-STRATEGIES = {
-    "ORB Breakout — Long":          "orb_long",
-    "ORB Breakout — Short":         "orb_short",
-    "ORB Breakout — Both Sides":    "orb_both",
-    "IB Breakout — Long":           "ib_long",
-    "IB Breakout — Short":          "ib_short",
-    "IB Breakout — Both Sides":     "ib_both",
-    "ORB confirmed by IB — Long":   "orb_ib_long",
-    "ORB confirmed by IB — Short":  "orb_ib_short",
-    "Failed ORB Reversal — Long":   "failed_orb_long",
-    "Failed ORB Reversal — Short":  "failed_orb_short",
-    "IB Retest — Long":             "ib_retest_long",
-    "IB Retest — Short":            "ib_retest_short",
-}
-
-SL_OPTIONS = {
-    "Full ORB/IB Range":  "range",
-    "Half ORB/IB Range":  "half_range",
-    "Fixed 50 pts":       "fixed_50",
-    "Fixed 100 pts":      "fixed_100",
-}
-
-# Default CSV locations — if present, the dashboard auto-loads them so no
-# manual upload is required. Uploaded files (if any) always take priority.
-DEFAULT_PATHS = {
+HERE  = os.path.dirname(os.path.abspath(__file__))
+FACTS = os.path.join(HERE, "analysis", "facts.csv")
+PATHS = {
     "NIFTY 50":   r"C:\NIFTY 50_minute.csv",
     "BANK NIFTY": r"C:\NIFTY BANK_minute.csv",
 }
 
-# ─── data loading ─────────────────────────────────────────────────────────────
+OPEN_T   = 9 * 60 + 15
+ORB_END  = OPEN_T + 15 - 1
+IB_END   = OPEN_T + 60 - 1
+T_GRID   = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]      # target (× range)
+S_GRID   = [0.25, 0.5, 0.75, 1.0]                # stop   (× range)
+DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
-@st.cache_data(show_spinner=False)
-def load_csv_path(path):
-    """Load a CSV directly from a filesystem path (used for auto-load)."""
-    df = pd.read_csv(path, parse_dates=["date"])
-    return _clean(df)
-
-
-@st.cache_data(show_spinner=False)
-def load_csv(file_bytes, filename):
-    import io
-    df = pd.read_csv(io.BytesIO(file_bytes), parse_dates=["date"])
-    return _clean(df)
-
-
-def _clean(df):
-    df.columns = df.columns.str.strip().str.lower()
-    df = df.sort_values("date").reset_index(drop=True)
-    # drop rows with any missing OHLC
-    df = df.dropna(subset=["open", "high", "low", "close"])
-    # sanity checks
-    df = df[(df["high"] >= df["low"]) & (df["open"] > 0) & (df["close"] > 0)]
-    df["date_only"] = df["date"].dt.date
-    df["t_min"]     = df["date"].dt.hour * 60 + df["date"].dt.minute   # minutes since midnight
-    return df.reset_index(drop=True)
-
-
-# ─── level computation ────────────────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False)
-def compute_levels(df, orb_min=15, ib_min=60):
-    """Return a per-day DataFrame with ORB and IB levels."""
-    open_t = 9 * 60 + 15          # 9:15 in minutes
-    orb_end_t = open_t + orb_min - 1
-    ib_end_t  = open_t + ib_min  - 1
-
-    records = []
-    for day, grp in df.groupby("date_only"):
-        orb_data = grp[(grp["t_min"] >= open_t) & (grp["t_min"] <= orb_end_t)]
-        ib_data  = grp[(grp["t_min"] >= open_t) & (grp["t_min"] <= ib_end_t)]
-        if orb_data.empty or ib_data.empty:
-            continue
-        records.append({
-            "date":      day,
-            "orb_high":  orb_data["high"].max(),
-            "orb_low":   orb_data["low"].min(),
-            "orb_range": orb_data["high"].max() - orb_data["low"].min(),
-            "orb_open":  orb_data.iloc[0]["open"],
-            "ib_high":   ib_data["high"].max(),
-            "ib_low":    ib_data["low"].min(),
-            "ib_range":  ib_data["high"].max() - ib_data["low"].min(),
-        })
-    return pd.DataFrame(records)
-
-
-# ─── stop-loss & target helpers ───────────────────────────────────────────────
-
-def get_sl_target(entry: float, direction: str, ref_range: float,
-                  sl_type: str, rr: float):
-    if sl_type == "range":
-        sl_pts = ref_range
-    elif sl_type == "half_range":
-        sl_pts = ref_range * 0.5
-    elif sl_type == "fixed_50":
-        sl_pts = 50.0
-    else:                          # fixed_100
-        sl_pts = 100.0
-
-    if direction == "long":
-        return entry - sl_pts, entry + sl_pts * rr, sl_pts
-    else:
-        return entry + sl_pts, entry - sl_pts * rr, sl_pts
-
-
-# ─── single-trade simulator ───────────────────────────────────────────────────
-
-def simulate_trade(entry_bar, entry_price, direction, sl, target, day_df):
-    """
-    Scan candles after entry_bar on the same day.
-    Returns (exit_time, exit_price, outcome) or None if no exit found.
-    """
-    for _, c in day_df[day_df["date"] > entry_bar].iterrows():
-        if c["date"].time() >= MARKET_CLOSE:
-            return c["date"], c["open"], "time_exit"
-
-        if direction == "long":
-            if c["low"] <= sl:
-                return c["date"], sl, "sl_hit"
-            if c["high"] >= target:
-                return c["date"], target, "target_hit"
-        else:
-            if c["high"] >= sl:
-                return c["date"], sl, "sl_hit"
-            if c["low"] <= target:
-                return c["date"], target, "target_hit"
-    return None
-
-
-# ─── core backtesting engine ──────────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False)
-def run_backtest(df, levels, strategy, rr, orb_min, ib_min, sl_type):
-
-    open_t   = 9 * 60 + 15
-    orb_end_t = open_t + orb_min
-    ib_end_t  = open_t + ib_min
-
-    trades = []
-
-    for _, lv in levels.iterrows():
-        day = lv["date"]
-        day_df = df[df["date_only"] == day].copy()
-        if day_df.empty:
-            continue
-
-        oh, ol, o_rng = lv["orb_high"], lv["orb_low"], lv["orb_range"]
-        ih, il, i_rng = lv["ib_high"],  lv["ib_low"],  lv["ib_range"]
-
-        # candles available after formation period
-        if strategy in ("orb_long", "orb_short", "orb_both",
-                        "failed_orb_long", "failed_orb_short"):
-            trade_start_t = orb_end_t
-        else:
-            # ib_*, orb_ib_* and ib_retest_* all need the full IB to form first
-            trade_start_t = ib_end_t
-
-        avail = day_df[day_df["t_min"] >= trade_start_t]
-        if avail.empty:
-            continue
-
-        def add_trade(bar, entry, direction, ref_range, ref_level):
-            sl, target, sl_pts = get_sl_target(entry, direction, ref_range, sl_type, rr)
-            result = simulate_trade(bar, entry, direction, sl, target, day_df)
-            if result is None:
-                return
-            exit_time, exit_price, outcome = result
-            pnl = (exit_price - entry) if direction == "long" else (entry - exit_price)
-            trades.append({
-                "date":        day,
-                "strategy":    strategy,
-                "direction":   direction,
-                "entry_time":  bar,
-                "entry":       entry,
-                "sl":          sl,
-                "target":      target,
-                "sl_pts":      sl_pts,
-                "ref_level":   ref_level,
-                "exit_time":   exit_time,
-                "exit_price":  exit_price,
-                "outcome":     outcome,
-                "pnl":         round(pnl, 2),
-                "win":         pnl > 0,
-            })
-
-        # ── state flags ───────────────────────────────────────────────────────
-        orb_long_done   = False
-        orb_short_done  = False
-        ib_long_done    = False
-        ib_short_done   = False
-        orb_h_broken    = False   # for failed-ORB
-        orb_l_broken    = False
-        ib_h_broken     = False   # for IB retest
-        ib_l_broken     = False
-        retest_done_l   = False
-        retest_done_s   = False
-
-        for _, row in avail.iterrows():
-            h, l, bar = row["high"], row["low"], row["date"]
-
-            # early exit once all expected trades for both-side strategies are done
-            if strategy == "orb_both" and orb_long_done and orb_short_done:
-                break
-            if strategy == "ib_both" and ib_long_done and ib_short_done:
-                break
-
-            # ── ORB Long ──────────────────────────────────────────────────────
-            if strategy in ("orb_long", "orb_both") and not orb_long_done:
-                if h > oh:
-                    orb_long_done = True
-                    add_trade(bar, oh, "long", o_rng, oh)
-                    if strategy == "orb_long":
-                        break
-
-            # ── ORB Short ─────────────────────────────────────────────────────
-            if strategy in ("orb_short", "orb_both") and not orb_short_done:
-                if l < ol:
-                    orb_short_done = True
-                    add_trade(bar, ol, "short", o_rng, ol)
-                    if strategy == "orb_short":
-                        break
-                    if strategy == "orb_both" and orb_long_done:
-                        break
-
-            # ── IB Long ───────────────────────────────────────────────────────
-            if strategy in ("ib_long", "ib_both") and not ib_long_done:
-                if h > ih:
-                    ib_long_done = True
-                    add_trade(bar, ih, "long", i_rng, ih)
-                    if strategy == "ib_long":
-                        break
-
-            # ── IB Short ──────────────────────────────────────────────────────
-            if strategy in ("ib_short", "ib_both") and not ib_short_done:
-                if l < il:
-                    ib_short_done = True
-                    add_trade(bar, il, "short", i_rng, il)
-                    if strategy == "ib_short":
-                        break
-                    if strategy == "ib_both" and ib_long_done:
-                        break
-
-            # ── ORB confirmed by IB — Long (ORB high AND IB high both broken) ─
-            if strategy == "orb_ib_long" and not orb_long_done:
-                if h > oh and h > ih:
-                    orb_long_done = True
-                    entry = max(oh, ih)
-                    add_trade(bar, entry, "long", o_rng, entry)
-                    break
-
-            # ── ORB confirmed by IB — Short ───────────────────────────────────
-            if strategy == "orb_ib_short" and not orb_short_done:
-                if l < ol and l < il:
-                    orb_short_done = True
-                    entry = min(ol, il)
-                    add_trade(bar, entry, "short", o_rng, entry)
-                    break
-
-            # ── Failed ORB Reversal — Short ───────────────────────────────────
-            # Price breaks ORB High (fake out) then falls below ORB Low → short
-            if strategy == "failed_orb_short":
-                if not orb_h_broken and h > oh:
-                    orb_h_broken = True
-                if orb_h_broken and not orb_short_done and l < ol:
-                    orb_short_done = True
-                    add_trade(bar, ol, "short", o_rng, ol)
-                    break
-
-            # ── Failed ORB Reversal — Long ────────────────────────────────────
-            # Price breaks ORB Low (fake out) then rises above ORB High → long
-            if strategy == "failed_orb_long":
-                if not orb_l_broken and l < ol:
-                    orb_l_broken = True
-                if orb_l_broken and not orb_long_done and h > oh:
-                    orb_long_done = True
-                    add_trade(bar, oh, "long", o_rng, oh)
-                    break
-
-            # ── IB Retest Long ────────────────────────────────────────────────
-            # IB High broken, price pulls back close to IB High, then bounces
-            if strategy == "ib_retest_long":
-                if not ib_h_broken and h > ih:
-                    ib_h_broken = True
-                if ib_h_broken and not retest_done_l:
-                    zone = max(i_rng * 0.12, 20)
-                    if abs(l - ih) <= zone:      # price touched IB High area
-                        retest_done_l = True
-                        add_trade(bar, ih, "long", i_rng * 0.5, ih)
-                        break
-
-            # ── IB Retest Short ───────────────────────────────────────────────
-            if strategy == "ib_retest_short":
-                if not ib_l_broken and l < il:
-                    ib_l_broken = True
-                if ib_l_broken and not retest_done_s:
-                    zone = max(i_rng * 0.12, 20)
-                    if abs(h - il) <= zone:
-                        retest_done_s = True
-                        add_trade(bar, il, "short", i_rng * 0.5, il)
-                        break
-
-    return pd.DataFrame(trades) if trades else pd.DataFrame()
-
-
-# ─── metrics ─────────────────────────────────────────────────────────────────
-
-def compute_metrics(trades: pd.DataFrame) -> dict:
-    if trades.empty:
-        return {}
-    pnl  = trades["pnl"]
-    wins = trades["win"]
-
-    cum   = pnl.cumsum()
-    dd    = cum - cum.cummax()
-    gp    = pnl[pnl > 0].sum()
-    gl    = pnl[pnl < 0].abs().sum()
-    pf    = gp / gl if gl > 0 else float("inf")
-
-    return {
-        "total_trades":  len(trades),
-        "win_rate":       wins.mean(),
-        "net_pnl":        pnl.sum(),
-        "max_drawdown":   dd.min(),
-        "profit_factor":  pf,
-        "avg_win":        pnl[pnl > 0].mean() if wins.any() else 0,
-        "avg_loss":       pnl[pnl < 0].mean() if (~wins).any() else 0,
-        "best_trade":     pnl.max(),
-        "worst_trade":    pnl.min(),
-        "avg_trade":      pnl.mean(),
-        "winners":        int(wins.sum()),
-        "losers":         int((~wins).sum()),
-        "cumulative":     cum,
-        "drawdown":       dd,
-    }
-
-
-# ─── chart helpers ────────────────────────────────────────────────────────────
-
-def equity_chart(trades: pd.DataFrame, title: str):
-    t = trades.sort_values("exit_time")
-    cum = t["pnl"].cumsum()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=t["exit_time"], y=cum,
-        mode="lines", name="Equity",
-        line=dict(color="#2196F3", width=2),
-        fill="tozeroy", fillcolor="rgba(33,150,243,0.10)",
-    ))
-    fig.update_layout(title=title, xaxis_title="Date",
-                      yaxis_title="Cumulative PnL (pts)",
-                      height=320, template="plotly_white",
-                      margin=dict(t=40, b=30))
-    return fig
-
-
-def drawdown_chart(trades: pd.DataFrame, title: str):
-    t   = trades.sort_values("exit_time")
-    cum = t["pnl"].cumsum()
-    dd  = cum - cum.cummax()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=t["exit_time"], y=dd,
-        mode="lines", name="Drawdown",
-        line=dict(color="#F44336", width=1.5),
-        fill="tozeroy", fillcolor="rgba(244,67,54,0.12)",
-    ))
-    fig.update_layout(title=title, xaxis_title="Date",
-                      yaxis_title="Drawdown (pts)",
-                      height=220, template="plotly_white",
-                      margin=dict(t=40, b=30))
-    return fig
-
-
-def monthly_chart(trades: pd.DataFrame, title: str):
-    t = trades.copy()
-    t["month"] = pd.to_datetime(t["exit_time"]).dt.to_period("M").astype(str)
-    monthly = t.groupby("month")["pnl"].sum().reset_index()
-    colors  = ["#4CAF50" if v >= 0 else "#F44336" for v in monthly["pnl"]]
-    fig = go.Figure(go.Bar(x=monthly["month"], y=monthly["pnl"],
-                           marker_color=colors))
-    fig.update_layout(title=title, height=300, template="plotly_white",
-                      xaxis_tickangle=-45, margin=dict(t=40, b=60))
-    return fig
-
-
-# ─── strategy description table ───────────────────────────────────────────────
-
-STRATEGY_DESCRIPTIONS = {
-    "orb_long":         "Buy when price breaks above the ORB high. SL at ORB low.",
-    "orb_short":        "Sell when price breaks below the ORB low. SL at ORB high.",
-    "orb_both":         "Take whichever ORB side breaks first each day.",
-    "ib_long":          "Buy when price breaks above the IB (60-min) high.",
-    "ib_short":         "Sell when price breaks below the IB low.",
-    "ib_both":          "Take whichever IB side breaks first each day.",
-    "orb_ib_long":      "Buy only when BOTH ORB High and IB High are broken simultaneously — strong bull filter.",
-    "orb_ib_short":     "Sell only when BOTH ORB Low and IB Low are broken simultaneously — strong bear filter.",
-    "failed_orb_long":  "ORB Low breaks first (fake-out bear), then price reclaims ORB High → long entry.",
-    "failed_orb_short": "ORB High breaks first (fake-out bull), then price drops below ORB Low → short entry.",
-    "ib_retest_long":   "IB High is broken, price retests that level from above → long (breakout retest).",
-    "ib_retest_short":  "IB Low is broken, price retests that level from below → short (breakout retest).",
+SIDE_LOGICS = {
+    "First-move fade":   "fade",     # high-first → short, low-first → long
+    "Long @ high break": "long",
+    "Short @ low break": "short",
+    "Gap continuation":  "gap",      # gap up → long, gap down → short, flat skip
 }
 
 
-# ─── main app ─────────────────────────────────────────────────────────────────
+# ─── data loaders ─────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def load_min(path, mtime):
+    df = pd.read_csv(path, parse_dates=["date"])
+    df.columns = df.columns.str.strip().str.lower()
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    df = df[(df["high"] >= df["low"]) & (df["open"] > 0)]
+    df = df.sort_values("date").reset_index(drop=True)
+    df["date_only"] = df["date"].dt.date
+    df["t_min"] = df["date"].dt.hour * 60 + df["date"].dt.minute
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_facts(mtime):
+    df = pd.read_csv(FACTS, parse_dates=["date"])
+    df["day_kind"] = np.where(df["inside_day"], "Inside Day",
+                     np.where(df["outside_day"], "Outside Day", "Normal"))
+    return df
+
+
+# ─── first-passage cache (the engine) ─────────────────────────────────────────
+
+@st.cache_data(show_spinner=True)
+def build_passage(instrument, tag, mpath, mtime, facts_mtime):
+    """
+    Per-day first-passage table: for a long-on-high-break and a short-on-low-break,
+    the minute each target/stop level (× range) is first reached. This resolves
+    target-vs-stop ordering exactly for ANY (target, stop) pair without re-simulating.
+    """
+    mdf = load_min(mpath, mtime)
+    meta = load_facts(facts_mtime)
+    meta = meta[meta["instrument"] == instrument].set_index("date")
+    end_t = ORB_END if tag == "orb" else IB_END
+
+    rows = []
+    for day, g in mdf.groupby("date_only", sort=True):
+        g = g.sort_values("t_min")
+        win  = g[(g["t_min"] >= OPEN_T) & (g["t_min"] <= end_t)]
+        post = g[g["t_min"] > end_t]
+        if len(win) < 5 or post.empty:
+            continue
+        hi, lo = win["high"].max(), win["low"].min()
+        rng = hi - lo
+        if rng <= 0:
+            continue
+        close = g.iloc[-1]["close"]
+        ph, pl, pt = post["high"].values, post["low"].values, post["t_min"].values
+
+        rec = {"date": pd.Timestamp(day), "range": rng, "day_close": close}
+
+        # LONG: enter at hi when high first exceeds hi
+        le = np.where(ph > hi)[0]
+        if len(le):
+            et = pt[le[0]]
+            rec["L_entry"] = hi
+            for t in T_GRID:
+                idx = np.where((ph >= hi + t * rng) & (pt >= et))[0]
+                rec[f"L_T_{t}"] = pt[idx[0]] if len(idx) else np.nan
+            for s in S_GRID:
+                idx = np.where((pl <= hi - s * rng) & (pt >= et))[0]
+                rec[f"L_S_{s}"] = pt[idx[0]] if len(idx) else np.nan
+        else:
+            rec["L_entry"] = np.nan
+
+        # SHORT: enter at lo when low first breaks lo
+        se = np.where(pl < lo)[0]
+        if len(se):
+            et = pt[se[0]]
+            rec["S_entry"] = lo
+            for t in T_GRID:
+                idx = np.where((pl <= lo - t * rng) & (pt >= et))[0]
+                rec[f"S_T_{t}"] = pt[idx[0]] if len(idx) else np.nan
+            for s in S_GRID:
+                idx = np.where((ph >= lo + s * rng) & (pt >= et))[0]
+                rec[f"S_S_{s}"] = pt[idx[0]] if len(idx) else np.nan
+        else:
+            rec["S_entry"] = np.nan
+
+        rows.append(rec)
+
+    P = pd.DataFrame(rows).set_index("date")
+    keep = ["dow", "gap_type", "day_kind", "prev_inside", f"{tag}_first_side",
+            "broke_pdh", "broke_pdl"]
+    P = P.join(meta[keep]).rename(columns={f"{tag}_first_side": "first_side"})
+    return P.reset_index()
+
+
+# ─── pnl construction ─────────────────────────────────────────────────────────
+
+def side_pnl(P, side, t, s):
+    """Per-day pnl (points) for taking `side` every day with target t, stop s."""
+    pre = "L" if side == "long" else "S"
+    entry = P[f"{pre}_entry"].values
+    rng   = P["range"].values
+    close = P["day_close"].values
+    fpt   = P[f"{pre}_T_{t}"].values
+    fps   = P[f"{pre}_S_{s}"].values
+
+    entered = ~np.isnan(entry)
+    fpt_i = np.where(np.isnan(fpt), np.inf, fpt)
+    fps_i = np.where(np.isnan(fps), np.inf, fps)
+
+    tgt_first  = entered & (fpt_i <= fps_i) & np.isfinite(fpt_i)
+    stop_first = entered & (fps_i <  fpt_i) & np.isfinite(fps_i)
+    neither    = entered & ~np.isfinite(fpt_i) & ~np.isfinite(fps_i)
+
+    if side == "long":
+        time_pnl = close - entry
+    else:
+        time_pnl = entry - close
+
+    pnl = np.full(len(P), np.nan)
+    pnl[tgt_first]  =  t * rng[tgt_first]
+    pnl[stop_first] = -s * rng[stop_first]
+    pnl[neither]    =  time_pnl[neither]
+    return pnl
+
+
+def logic_pnl(P, logic, t, s):
+    """Combine long/short pnl according to the side-logic; nan = no trade that day."""
+    lp = side_pnl(P, "long", t, s)
+    sp = side_pnl(P, "short", t, s)
+    if logic == "long":
+        return lp
+    if logic == "short":
+        return sp
+    if logic == "fade":          # high formed first → short, low first → long
+        return np.where(P["first_side"].values == "high", sp, lp)
+    if logic == "gap":           # gap up → long, gap down → short, else skip
+        out = np.full(len(P), np.nan)
+        gu = P["gap_type"].values == "Gap Up"
+        gd = P["gap_type"].values == "Gap Down"
+        out[gu] = lp[gu]
+        out[gd] = sp[gd]
+        return out
+    return lp
+
+
+# ─── filtering & metrics ──────────────────────────────────────────────────────
+
+def filter_mask(P, dows, gaps, kinds, first):
+    m = np.ones(len(P), dtype=bool)
+    if dows:  m &= P["dow"].isin(dows).values
+    if gaps:  m &= P["gap_type"].isin(gaps).values
+    if kinds: m &= P["day_kind"].isin(kinds).values
+    if first == "high": m &= (P["first_side"].values == "high")
+    if first == "low":  m &= (P["first_side"].values == "low")
+    return m
+
+
+def metrics(pnl_ordered):
+    """pnl_ordered: 1-D array of per-trade pnl in date order (no NaNs)."""
+    n = len(pnl_ordered)
+    if n == 0:
+        return None
+    wins = pnl_ordered > 0
+    gp = pnl_ordered[pnl_ordered > 0].sum()
+    gl = -pnl_ordered[pnl_ordered < 0].sum()
+    cum = np.cumsum(pnl_ordered)
+    dd  = cum - np.maximum.accumulate(cum)
+    return {
+        "trades": n,
+        "win_rate": wins.mean(),
+        "expectancy": pnl_ordered.mean(),
+        "net": pnl_ordered.sum(),
+        "pf": (gp / gl) if gl > 0 else np.inf,
+        "max_dd": dd.min(),
+        "avg_win": pnl_ordered[wins].mean() if wins.any() else 0,
+        "avg_loss": pnl_ordered[~wins].mean() if (~wins).any() else 0,
+        "cum": cum,
+    }
+
+
+def evaluate(P, logic, t, s, dows, gaps, kinds, first):
+    pnl = logic_pnl(P, logic, t, s)
+    mask = filter_mask(P, dows, gaps, kinds, first) & ~np.isnan(pnl)
+    return pnl[mask], P.loc[mask, "date"].values
+
+
+# ─── UI helpers ───────────────────────────────────────────────────────────────
+
+def pct(x): return f"{x*100:.1f}%"
+
+EDGE_NOTE = """
+**Edges in play (10-yr, both indices):**
+- **First-move fade** — high-first → low breaks ~75% (IB) / ~87% (ORB); symmetric for low-first.
+- **Gap continuation** — Gap Up → reach PDH **77%**, Gap Down → reach PDL **83%**.
+- **Outside day** — strong downside follow-through (IB low breaks ~78%).
+- **Inside-day** — next day breaks PDH **62%** vs PDL 48%.
+"""
+
+
+def resolve_path(instrument, uploaded):
+    if uploaded is not None:
+        tmp = os.path.join(HERE, "analysis", f"_uploaded_{instrument.replace(' ', '_')}.csv")
+        with open(tmp, "wb") as f:
+            f.write(uploaded.getbuffer())
+        return tmp
+    return PATHS.get(instrument)
+
+
+# ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    st.title("ORB & IB Strategy Backtester")
-    st.caption("Opening Range Breakout · Initial Balance · 12 strategy permutations · NIFTY 50 & BANK NIFTY")
+    st.title("📈 ORB / IB Edge Backtester")
+    st.caption("Trades the probability edges · targets & stops in × opening-range · "
+               "permutation optimizer to find the best configuration")
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
-    import os
+    if not os.path.exists(FACTS):
+        st.error("analysis/facts.csv missing — run `python build_facts.py` first.")
+        st.stop()
 
     with st.sidebar:
         st.header("Data")
-        auto = {k: v for k, v in DEFAULT_PATHS.items() if os.path.exists(v)}
-        if auto:
-            st.success("Auto-loaded: " + ", ".join(auto.keys()))
-            st.caption("Upload below to override with your own files.")
-        nifty_file  = st.file_uploader("NIFTY 50 (minute CSV)",    type="csv", key="n50")
-        bnifty_file = st.file_uploader("BANK NIFTY (minute CSV)",  type="csv", key="bnf")
+        instrument = st.radio("Instrument", list(PATHS.keys()))
+        setup = st.radio("Setup", ["IB (60 min)", "ORB (15 min)"])
+        tag = "ib" if setup.startswith("IB") else "orb"
+        up = st.file_uploader(f"Override {instrument} CSV", type="csv")
+        st.markdown(EDGE_NOTE)
 
-        st.header("Strategy")
-        strategy_name = st.selectbox("Strategy", list(STRATEGIES.keys()))
-        strategy_key  = STRATEGIES[strategy_name]
-        instrument    = st.radio("Instrument", ["NIFTY 50", "BANK NIFTY", "Both"], horizontal=True)
+    mpath = resolve_path(instrument, up)
+    if not mpath or not os.path.exists(mpath):
+        st.warning(f"No minute CSV found for {instrument}. Upload one in the sidebar.")
+        st.stop()
 
-        st.header("Parameters")
-        rr         = st.slider("Risk : Reward", 1.0, 5.0, 2.0, 0.5)
-        orb_min    = st.slider("ORB duration (min)", 5, 30, 15, 5)
-        ib_min     = st.slider("IB duration (min)",  30, 120, 60, 15)
-        sl_label   = st.selectbox("Stop Loss type", list(SL_OPTIONS.keys()))
-        sl_type    = SL_OPTIONS[sl_label]
+    with st.spinner(f"Indexing {instrument} {setup} (first run is cached)…"):
+        P = build_passage(instrument, tag, mpath, os.path.getmtime(mpath),
+                          os.path.getmtime(FACTS))
 
-        st.header("Date Filter")
-        use_filter = st.checkbox("Enable date filter")
+    tab1, tab2 = st.tabs(["🎯 Single Strategy", "🔬 Optimizer (permutations)"])
 
-        run = st.button("▶  Run Backtest", type="primary", use_container_width=True)
+    # ============================ SINGLE STRATEGY ============================
+    with tab1:
+        c = st.columns(4)
+        logic_label = c[0].selectbox("Side logic", list(SIDE_LOGICS.keys()))
+        logic = SIDE_LOGICS[logic_label]
+        t = c[1].select_slider("Target (× range)", T_GRID, value=1.0)
+        s = c[2].select_slider("Stop (× range)",   S_GRID, value=0.5)
+        first = c[3].selectbox("First-side filter", ["Either", "high", "low"])
 
-    # ── Load files (uploads take priority, else auto-load from C:\) ───────────
-    available = {}
-    # 1) auto-load any default CSVs that exist on disk
-    for name, path in DEFAULT_PATHS.items():
-        if os.path.exists(path):
-            try:
-                available[name] = load_csv_path(path)
-            except Exception as e:
-                st.sidebar.error(f"Could not auto-load {name}: {e}")
-    # 2) uploads override auto-loaded data
-    if nifty_file:
-        available["NIFTY 50"]   = load_csv(nifty_file.read(),  nifty_file.name)
-    if bnifty_file:
-        available["BANK NIFTY"] = load_csv(bnifty_file.read(), bnifty_file.name)
+        c2 = st.columns(3)
+        dows  = c2[0].multiselect("Day of week", DOW_ORDER, default=DOW_ORDER)
+        gaps  = c2[1].multiselect("Gap type", ["Gap Up", "Flat", "Gap Down"],
+                                  default=["Gap Up", "Flat", "Gap Down"])
+        kinds = c2[2].multiselect("Day kind", ["Inside Day", "Normal", "Outside Day"],
+                                  default=["Inside Day", "Normal", "Outside Day"])
 
-    if not available:
-        _show_landing()
-        return
+        first_f = "" if first == "Either" else first
+        pnl, dates = evaluate(P, logic, t, s, dows, gaps, kinds, first_f)
+        m = metrics(pnl)
 
-    # ── Date filter UI (needs data to know range) ─────────────────────────────
-    date_range = None
-    if use_filter:
-        all_dates = pd.concat(
-            [df["date_only"].apply(pd.Timestamp) for df in available.values()]
-        )
-        d_min = all_dates.min().date()
-        d_max = all_dates.max().date()
-        with st.sidebar:
-            date_range = st.date_input("Date range", value=(d_min, d_max),
-                                       min_value=d_min, max_value=d_max)
+        st.divider()
+        if m is None:
+            st.warning("No trades for this configuration.")
+        else:
+            if m["trades"] < 30:
+                st.warning(f"⚠ Only {m['trades']} trades — low confidence.")
+            k = st.columns(6)
+            k[0].metric("Win Rate", pct(m["win_rate"]))
+            k[1].metric("Max Drawdown", f"{m['max_dd']:,.0f} pts")
+            k[2].metric("Expectancy", f"{m['expectancy']:.1f} pts/trade")
+            k[3].metric("Net P&L", f"{m['net']:,.0f} pts")
+            k[4].metric("Profit Factor", f"{m['pf']:.2f}" if np.isfinite(m["pf"]) else "∞")
+            k[5].metric("Trades", f"{m['trades']:,}")
 
-    # ── Show data summary before running ─────────────────────────────────────
-    if not run:
-        _show_data_summary(available)
-        return
+            k2 = st.columns(3)
+            k2[0].metric("Avg Win", f"{m['avg_win']:.1f} pts")
+            k2[1].metric("Avg Loss", f"{m['avg_loss']:.1f} pts")
+            rr = (m["avg_win"] / abs(m["avg_loss"])) if m["avg_loss"] else 0
+            k2[2].metric("Reward : Risk (realised)", f"{rr:.2f}")
 
-    # ── Select instruments ────────────────────────────────────────────────────
-    if instrument == "Both":
-        targets = list(available.keys())
-    else:
-        targets = [instrument] if instrument in available else list(available.keys())
+            order = np.argsort(dates)
+            fig = go.Figure()
+            fig.add_scatter(x=pd.to_datetime(dates[order]), y=np.cumsum(pnl[order]),
+                            mode="lines", line=dict(color="#2196F3", width=2),
+                            fill="tozeroy", fillcolor="rgba(33,150,243,0.10)")
+            fig.update_layout(title=f"Equity curve — {logic_label} · target {t}× / stop {s}×",
+                              height=360, template="plotly_white",
+                              yaxis_title="cumulative pts")
+            st.plotly_chart(fig, use_container_width=True)
 
-    # ── Run backtests ─────────────────────────────────────────────────────────
-    for inst in targets:
-        df = available[inst].copy()
+            st.caption(f"{instrument} · {setup} · {logic_label} · "
+                       f"target {t}× / stop {s}× (R:R {t/s:.1f}) · {m['trades']:,} trades")
 
-        if date_range and len(date_range) == 2:
-            s, e = pd.Timestamp(date_range[0]).date(), pd.Timestamp(date_range[1]).date()
-            df = df[(df["date_only"] >= s) & (df["date_only"] <= e)]
+    # ============================ OPTIMIZER ============================
+    with tab2:
+        st.markdown("Sweep permutations and rank by your chosen metric. "
+                    "Each row is a fully-specified, tradeable rule.")
+        o = st.columns(4)
+        sweep_logics = o[0].multiselect("Side logics", list(SIDE_LOGICS.keys()),
+                                        default=list(SIDE_LOGICS.keys()))
+        sort_metric = o[1].selectbox("Rank by",
+                                     ["expectancy", "net", "win_rate", "pf"])
+        min_trades = o[2].number_input("Min trades", 20, 2000, 100, 10)
+        sweep_dow  = o[3].checkbox("Also sweep each weekday", value=False)
 
-        if df.empty:
-            st.warning(f"No data for {inst} in the selected date range.")
-            continue
+        o2 = st.columns(3)
+        sweep_gap   = o2[0].checkbox("Sweep gap type", value=True)
+        sweep_kind  = o2[1].checkbox("Sweep day kind", value=True)
+        sweep_first = o2[2].checkbox("Sweep first-side", value=True)
 
-        with st.spinner(f"Computing ORB/IB levels for {inst}…"):
-            levels = compute_levels(df, orb_min, ib_min)
+        if st.button("🔎 Run optimization", type="primary"):
+            gap_opts   = [None, "Gap Up", "Gap Down", "Flat"] if sweep_gap else [None]
+            kind_opts  = [None, "Inside Day", "Outside Day", "Normal"] if sweep_kind else [None]
+            first_opts = ["", "high", "low"] if sweep_first else [""]
+            dow_opts   = [None] + DOW_ORDER if sweep_dow else [None]
 
-        with st.spinner(f"Running backtest for {inst} — {strategy_name}…"):
-            trades = run_backtest(df, levels, strategy_key, rr, orb_min, ib_min, sl_type)
+            combos = list(itertools.product(
+                [SIDE_LOGICS[l] for l in sweep_logics],
+                T_GRID, S_GRID, dow_opts, gap_opts, kind_opts, first_opts))
+            inv = {v: k for k, v in SIDE_LOGICS.items()}
 
-        _display_results(inst, strategy_name, strategy_key, trades, levels)
+            results = []
+            prog = st.progress(0.0, text=f"Evaluating {len(combos):,} permutations…")
+            # precompute pnl per (logic, t, s) to avoid recompute across filters
+            cache = {}
+            for i, (lg, t, s, d, gp, kd, fs) in enumerate(combos):
+                key = (lg, t, s)
+                if key not in cache:
+                    cache[key] = logic_pnl(P, lg, t, s)
+                pnl_all = cache[key]
+                dows  = [d] if d else DOW_ORDER
+                gaps  = [gp] if gp else ["Gap Up", "Flat", "Gap Down"]
+                kinds = [kd] if kd else ["Inside Day", "Normal", "Outside Day"]
+                mask = filter_mask(P, dows, gaps, kinds, fs) & ~np.isnan(pnl_all)
+                if mask.sum() < min_trades:
+                    continue
+                m = metrics(pnl_all[mask])
+                if m is None:
+                    continue
+                results.append({
+                    "side logic": inv[lg],
+                    "target×": t, "stop×": s, "R:R": round(t / s, 2),
+                    "weekday": d or "all",
+                    "gap": gp or "any", "day kind": kd or "any",
+                    "first": fs or "any",
+                    "trades": m["trades"],
+                    "win %": round(m["win_rate"] * 100, 1),
+                    "expectancy": round(m["expectancy"], 2),
+                    "net": round(m["net"], 0),
+                    "PF": round(m["pf"], 2) if np.isfinite(m["pf"]) else 99,
+                    "max DD": round(m["max_dd"], 0),
+                })
+                if i % 200 == 0:
+                    prog.progress(i / len(combos), text=f"{i:,}/{len(combos):,} permutations…")
+            prog.empty()
 
-
-# ─── landing page ─────────────────────────────────────────────────────────────
-
-def _show_landing():
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Expected CSV format")
-        st.code(
-            "date,open,high,low,close,volume\n"
-            "2015-01-09 09:15:00,8285.45,8295.9,8285.45,8292.1,0\n"
-            "2015-01-09 09:16:00,8292.6,8293.6,8287.2,8288.15,0\n"
-            "…",
-            language="text"
-        )
-    with c2:
-        st.subheader("Strategy guide")
-        rows = [{"Strategy": k, "Logic": STRATEGY_DESCRIPTIONS[v]}
-                for k, v in STRATEGIES.items()]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
-def _show_data_summary(available):
-    st.subheader("Data loaded — configure & click **▶ Run Backtest**")
-    for name, df in available.items():
-        with st.expander(f"{name}  ({len(df):,} candles)", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Trading Days", f"{df['date_only'].nunique():,}")
-            c2.metric("From", str(df['date_only'].min()))
-            c3.metric("To",   str(df['date_only'].max()))
-            st.dataframe(df.head(8)[["date","open","high","low","close","volume"]],
-                         use_container_width=True, hide_index=True)
-
-
-# ─── result display ───────────────────────────────────────────────────────────
-
-def _display_results(inst, strategy_name, strategy_key, trades, levels):
-    st.divider()
-    st.subheader(f"{inst}  ·  {strategy_name}")
-    st.caption(STRATEGY_DESCRIPTIONS.get(strategy_key, ""))
-
-    if trades.empty:
-        st.warning("No trades were generated. Try a different strategy, date range, or SL type.")
-        return
-
-    m = compute_metrics(trades)
-
-    # ── Metric cards row 1 ────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    wr = m["win_rate"]
-    c1.metric("Total Trades",  f"{m['total_trades']:,}")
-    c2.metric("Win Rate",      f"{wr*100:.1f}%",
-              delta=f"{(wr-0.5)*100:+.1f}% vs 50%",
-              delta_color="normal")
-    c3.metric("Net PnL (pts)", f"{m['net_pnl']:,.0f}",
-              delta_color="normal")
-    c4.metric("Max Drawdown",  f"{m['max_drawdown']:,.0f}")
-    c5.metric("Profit Factor", f"{m['profit_factor']:.2f}")
-    c6.metric("Avg Trade",     f"{m['avg_trade']:,.1f}")
-
-    # ── Metric cards row 2 ────────────────────────────────────────────────────
-    c7, c8, c9, c10, c11, c12 = st.columns(6)
-    c7.metric("Winners",    f"{m['winners']}")
-    c8.metric("Losers",     f"{m['losers']}")
-    c9.metric("Avg Win",    f"{m['avg_win']:,.1f}")
-    c10.metric("Avg Loss",  f"{m['avg_loss']:,.1f}")
-    c11.metric("Best Trade",  f"{m['best_trade']:,.1f}")
-    c12.metric("Worst Trade", f"{m['worst_trade']:,.1f}")
-
-    # ── Charts ────────────────────────────────────────────────────────────────
-    st.plotly_chart(equity_chart(trades,   f"{inst} — Equity Curve"),
-                    use_container_width=True)
-    st.plotly_chart(drawdown_chart(trades, f"{inst} — Drawdown"),
-                    use_container_width=True)
-
-    col_left, col_right = st.columns(2)
-    with col_left:
-        fig_hist = px.histogram(
-            trades, x="pnl", nbins=40,
-            color_discrete_sequence=["#4CAF50"],
-            title="PnL Distribution",
-        )
-        fig_hist.add_vline(x=0, line_dash="dash", line_color="red")
-        fig_hist.update_layout(height=280, template="plotly_white",
-                               margin=dict(t=40, b=30))
-        st.plotly_chart(fig_hist, use_container_width=True)
-
-    with col_right:
-        oc = trades["outcome"].value_counts()
-        fig_pie = px.pie(
-            values=oc.values, names=oc.index,
-            title="Exit Breakdown",
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        fig_pie.update_layout(height=280, margin=dict(t=40, b=10))
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    st.plotly_chart(monthly_chart(trades, f"{inst} — Monthly PnL (pts)"),
-                    use_container_width=True)
-
-    # ── Win rate by direction ─────────────────────────────────────────────────
-    if trades["direction"].nunique() > 1:
-        wr_dir = (
-            trades.groupby("direction")
-            .agg(trades=("win", "count"), win_rate=("win", "mean"), net_pnl=("pnl", "sum"))
-            .reset_index()
-        )
-        wr_dir["win_rate"] = (wr_dir["win_rate"] * 100).round(1).astype(str) + "%"
-        wr_dir["net_pnl"]  = wr_dir["net_pnl"].round(0)
-        st.dataframe(wr_dir, use_container_width=True, hide_index=True)
-
-    # ── ORB/IB range stats ────────────────────────────────────────────────────
-    with st.expander("ORB / IB Level Statistics"):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**ORB range distribution**")
-            st.dataframe(
-                levels["orb_range"].describe().rename("pts").round(1).to_frame(),
-                use_container_width=True,
-            )
-        with col_b:
-            st.markdown("**IB range distribution**")
-            st.dataframe(
-                levels["ib_range"].describe().rename("pts").round(1).to_frame(),
-                use_container_width=True,
-            )
-
-    # ── Trade log ─────────────────────────────────────────────────────────────
-    with st.expander(f"Trade Log  ({len(trades)} trades)"):
-        cols = ["date", "direction", "entry_time", "entry", "sl", "target",
-                "exit_time", "exit_price", "outcome", "pnl", "win"]
-        st.dataframe(
-            trades[cols].sort_values("entry_time", ascending=False),
-            use_container_width=True, hide_index=True,
-        )
-
-    # ── Download ──────────────────────────────────────────────────────────────
-    csv = trades.to_csv(index=False).encode()
-    st.download_button(
-        f"⬇ Download {inst} trade log",
-        data=csv,
-        file_name=f"{inst.replace(' ','_')}_{strategy_key}_trades.csv",
-        mime="text/csv",
-    )
+            if not results:
+                st.warning("No configurations met the minimum-trades threshold. Lower it.")
+            else:
+                res = pd.DataFrame(results)
+                asc = sort_metric in ()           # all our metrics: higher = better
+                res = res.sort_values(sort_metric, ascending=False).reset_index(drop=True)
+                st.success(f"{len(res):,} valid configurations · showing top 40 by {sort_metric}")
+                st.dataframe(res.head(40), use_container_width=True, hide_index=True,
+                             column_config={
+                                 "win %": st.column_config.NumberColumn(format="%.1f"),
+                                 "expectancy": st.column_config.NumberColumn(format="%.2f"),
+                             })
+                st.download_button("⬇ Download all results",
+                                   res.to_csv(index=False).encode(),
+                                   file_name=f"optimizer_{instrument}_{tag}.csv",
+                                   mime="text/csv")
+                st.caption("Expectancy = avg pts/trade. Prefer configs with high trades + "
+                           "positive expectancy + shallow max-DD; treat extreme PF on few "
+                           "trades with suspicion (overfitting).")
 
 
 if __name__ == "__main__":
