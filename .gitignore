@@ -4,3 +4,4 @@ analysis/facts.csv
 analysis/facts.parquet
 analysis/_uploaded_*.csv
 .streamlit/
+logs/
