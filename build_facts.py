@@ -36,10 +36,11 @@ FILES = {
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-OPEN_T   = 9 * 60 + 15          # 09:15
+DEFAULT_OPEN_T  = 9 * 60 + 15    # 09:15 (NSE). Auto-detected per instrument when None.
+DEFAULT_CLOSE_T = 15 * 60 + 15   # 15:15 square-off — nothing carries past this.
 ORB_MIN  = 15
 IB_MIN   = 60
-GAP_THRESHOLD = 0.15            # % vs prev close to qualify as Gap Up/Down
+GAP_THRESHOLD = 0.15             # % vs prev close to qualify as Gap Up/Down
 
 
 def _first_extreme_side(win, hi, lo):
@@ -118,35 +119,61 @@ def _pd_breaks(g, pdh, pdl):
     return bh, bl, first
 
 
-def build_instrument(name, path):
-    print(f"\n[{name}] reading {path} ...")
-    df = pd.read_csv(path, parse_dates=["date"])
+def clean_min(df):
+    """Normalise an OHLC minute DataFrame: lowercase cols, parse date, add t_min."""
+    df = df.copy()
     df.columns = df.columns.str.strip().str.lower()
+    if "date" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    for c in ("open", "high", "low", "close"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close"])
     df = df[(df["high"] >= df["low"]) & (df["open"] > 0)]
     df = df.sort_values("date").reset_index(drop=True)
     df["date_only"] = df["date"].dt.date
     df["t_min"] = df["date"].dt.hour * 60 + df["date"].dt.minute
-    print(f"   {len(df):,} candles over {df['date_only'].nunique():,} days")
+    return df
 
-    orb_end = OPEN_T + ORB_MIN - 1
-    ib_end  = OPEN_T + IB_MIN  - 1
+
+def detect_open_t(df):
+    """Session open = the most common first-candle minute across days (auto-detect)."""
+    firsts = df.groupby("date_only")["t_min"].min()
+    return int(firsts.mode().iloc[0])
+
+
+def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T):
+    """
+    Build the per-day facts table from minute data for ANY instrument.
+    open_t  : session-open minute (auto-detected if None) → IB/ORB windows start here.
+    close_t : square-off minute (default 15:15) → nothing after this counts; no carry.
+    """
+    if "t_min" not in df.columns:
+        df = clean_min(df)
+    if open_t is None:
+        open_t = detect_open_t(df)
+    orb_end = open_t + ORB_MIN - 1
+    ib_end  = open_t + IB_MIN  - 1
 
     recs = []
     prev_close = prev_high = prev_low = None
     prev_inside = False
 
-    for day, g in df.groupby("date_only", sort=True):
-        g = g.sort_values("t_min")
-        orb = g[(g["t_min"] >= OPEN_T) & (g["t_min"] <= orb_end)]
-        ib  = g[(g["t_min"] >= OPEN_T) & (g["t_min"] <= ib_end)]
+    for day, g0 in df.groupby("date_only", sort=True):
+        # session window only: [open_t, close_t]  → enforces the 15:15 square-off
+        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
+        if sess.empty:
+            continue
+        g = sess
+        orb = g[g["t_min"] <= orb_end]
+        ib  = g[g["t_min"] <= ib_end]
         if len(orb) < 5 or len(ib) < 20:
             prev_close, prev_high, prev_low = g.iloc[-1]["close"], g["high"].max(), g["low"].min()
             prev_inside = False
             continue
 
         day_open  = g.iloc[0]["open"]
-        day_close = g.iloc[-1]["close"]
+        day_close = g.iloc[-1]["close"]      # close AT the square-off
         day_high  = g["high"].max()
         day_low   = g["low"].min()
 
@@ -209,7 +236,16 @@ def build_instrument(name, path):
         prev_close, prev_high, prev_low = day_close, day_high, day_low
         prev_inside = inside
 
-    out = pd.DataFrame(recs)
+    return pd.DataFrame(recs)
+
+
+def build_instrument(name, path, open_t=None, close_t=DEFAULT_CLOSE_T):
+    print(f"\n[{name}] reading {path} ...")
+    df = clean_min(pd.read_csv(path))
+    ot = open_t if open_t is not None else detect_open_t(df)
+    print(f"   {len(df):,} candles over {df['date_only'].nunique():,} days; "
+          f"open={ot} close={close_t}")
+    out = build_from_minute(df, name, open_t, close_t)
     print(f"   built {len(out):,} usable day-records")
     return out
 

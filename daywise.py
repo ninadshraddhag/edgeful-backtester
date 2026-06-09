@@ -28,9 +28,14 @@ target are both touched in the same candle, the stop is assumed hit first.
 import numpy as np
 import pandas as pd
 
-OPEN_T = 9 * 60 + 15          # 09:15
-IB_END = OPEN_T + 60 - 1      # 10:14 inclusive
+DEFAULT_OPEN_T  = 9 * 60 + 15   # 09:15 (NSE); auto-detected per instrument in the app
+DEFAULT_CLOSE_T = 15 * 60 + 15  # 15:15 square-off — positions force-exit, no overnight carry
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+
+def detect_open_t(min_df):
+    """Session open = most common first-candle minute across days."""
+    return int(min_df.groupby("date_only")["t_min"].min().mode().iloc[0])
 
 # Defaults mirror the user's screenshots
 DEFAULT_CONFIG = {
@@ -42,19 +47,22 @@ DEFAULT_CONFIG = {
 }
 
 
-def prep_days(min_df: pd.DataFrame) -> dict:
+def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE_T) -> dict:
     """
     Group minute data into per-day records keyed by weekday.
     Each record: H, L, Rg, day_open, close, ph/pl/pt (post-IB arrays), date, dow.
+    open_t  : session open (IB starts here).  close_t : square-off (no carry past this).
     """
+    ib_end = open_t + 60 - 1
     out = {d: [] for d in WEEKDAYS}
-    for day, g in min_df.groupby("date_only", sort=True):
+    for day, g0 in min_df.groupby("date_only", sort=True):
         dow = pd.Timestamp(day).day_name()
         if dow not in out:
             continue
-        g = g.sort_values("t_min")
-        win  = g[(g["t_min"] >= OPEN_T) & (g["t_min"] <= IB_END)]
-        post = g[g["t_min"] > IB_END]
+        # session window only → enforces the square-off
+        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
+        win  = sess[sess["t_min"] <= ib_end]
+        post = sess[sess["t_min"] > ib_end]
         if len(win) < 20 or post.empty:
             continue
         H, L = win["high"].max(), win["low"].min()
@@ -64,8 +72,8 @@ def prep_days(min_df: pd.DataFrame) -> dict:
         out[dow].append({
             "date": pd.Timestamp(day), "dow": dow,
             "H": float(H), "L": float(L), "Rg": float(Rg),
-            "day_open": float(g.iloc[0]["open"]),
-            "close": float(g.iloc[-1]["close"]),
+            "day_open": float(sess.iloc[0]["open"]),
+            "close": float(sess.iloc[-1]["close"]),     # close AT the square-off
             "ph": post["high"].values.astype(float),
             "pl": post["low"].values.astype(float),
             "pt": post["t_min"].values.astype(float),

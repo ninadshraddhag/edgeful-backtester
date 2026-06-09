@@ -26,6 +26,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import daywise
 import prob_app
+import build_facts
 from datetime import time as dtime
 
 st.set_page_config(page_title="ORB/IB Strategy Suite", page_icon="📈", layout="wide")
@@ -37,9 +38,8 @@ PATHS = {
     "BANK NIFTY": r"C:\NIFTY BANK_minute.csv",
 }
 
-OPEN_T   = 9 * 60 + 15
-ORB_END  = OPEN_T + 15 - 1
-IB_END   = OPEN_T + 60 - 1
+DEFAULT_OPEN_T  = 9 * 60 + 15    # 09:15 (NSE); auto-detected per instrument
+DEFAULT_CLOSE_T = 15 * 60 + 15   # 15:15 square-off — no positions/levels carry overnight
 T_GRID   = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]      # target (× range)
 S_GRID   = [0.25, 0.5, 0.75, 1.0]                # stop   (× range)
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
@@ -56,14 +56,7 @@ SIDE_LOGICS = {
 
 @st.cache_data(show_spinner=False)
 def load_min(path, mtime):
-    df = pd.read_csv(path, parse_dates=["date"])
-    df.columns = df.columns.str.strip().str.lower()
-    df = df.dropna(subset=["open", "high", "low", "close"])
-    df = df[(df["high"] >= df["low"]) & (df["open"] > 0)]
-    df = df.sort_values("date").reset_index(drop=True)
-    df["date_only"] = df["date"].dt.date
-    df["t_min"] = df["date"].dt.hour * 60 + df["date"].dt.minute
-    return df
+    return build_facts.clean_min(pd.read_csv(path))
 
 
 @st.cache_data(show_spinner=False)
@@ -74,32 +67,62 @@ def load_facts(mtime):
     return df
 
 
+@st.cache_data(show_spinner=False)
+def get_open_t(mpath, mtime):
+    """Auto-detect the session-open minute for any instrument."""
+    return daywise.detect_open_t(load_min(mpath, mtime))
+
+
+@st.cache_data(show_spinner=False)
+def get_date_bounds(mpath, mtime):
+    d = load_min(mpath, mtime)["date_only"]
+    return d.min(), d.max()
+
+
+@st.cache_data(show_spinner=True)
+def get_facts(instrument, mpath, mtime, open_t, close_t):
+    """
+    Per-day facts for ANY instrument & session. Uses the prebuilt facts.csv for the
+    default indices at the default 09:15/15:15 session; otherwise computes live.
+    """
+    if (instrument in PATHS and open_t == DEFAULT_OPEN_T
+            and close_t == DEFAULT_CLOSE_T and os.path.exists(FACTS)):
+        f = load_facts(os.path.getmtime(FACTS))
+        sub = f[f["instrument"] == instrument].copy()
+        if len(sub):
+            return sub
+    facts = build_facts.build_from_minute(load_min(mpath, mtime), instrument, open_t, close_t)
+    facts["day_kind"] = np.where(facts["inside_day"], "Inside Day",
+                        np.where(facts["outside_day"], "Outside Day", "Normal"))
+    return facts
+
+
 # ─── first-passage cache (the engine) ─────────────────────────────────────────
 
 @st.cache_data(show_spinner=True)
-def build_passage(instrument, tag, mpath, mtime, facts_mtime):
+def build_passage(instrument, tag, mpath, mtime, open_t, close_t):
     """
     Per-day first-passage table: for a long-on-high-break and a short-on-low-break,
     the minute each target/stop level (× range) is first reached. This resolves
     target-vs-stop ordering exactly for ANY (target, stop) pair without re-simulating.
+    Capped at the square-off (close_t) — nothing carries past it.
     """
     mdf = load_min(mpath, mtime)
-    meta = load_facts(facts_mtime)
-    meta = meta[meta["instrument"] == instrument].set_index("date")
-    end_t = ORB_END if tag == "orb" else IB_END
+    meta = get_facts(instrument, mpath, mtime, open_t, close_t).set_index("date")
+    end_t = (open_t + 15 - 1) if tag == "orb" else (open_t + 60 - 1)
 
     rows = []
-    for day, g in mdf.groupby("date_only", sort=True):
-        g = g.sort_values("t_min")
-        win  = g[(g["t_min"] >= OPEN_T) & (g["t_min"] <= end_t)]
-        post = g[g["t_min"] > end_t]
+    for day, g0 in mdf.groupby("date_only", sort=True):
+        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
+        win  = sess[sess["t_min"] <= end_t]
+        post = sess[sess["t_min"] > end_t]
         if len(win) < 5 or post.empty:
             continue
         hi, lo = win["high"].max(), win["low"].min()
         rng = hi - lo
         if rng <= 0:
             continue
-        close = g.iloc[-1]["close"]
+        close = sess.iloc[-1]["close"]          # close AT square-off
         ph, pl, pt = post["high"].values, post["low"].values, post["t_min"].values
 
         rec = {"date": pd.Timestamp(day), "range": rng, "day_close": close}
@@ -255,12 +278,62 @@ def resolve_path(instrument, uploaded):
     return PATHS.get(instrument)
 
 
+def data_sidebar(key):
+    """
+    Shared sidebar block: instrument picker (incl. uploads like XAUUSD / NQ),
+    auto-detected session open, square-off time and date range.
+    Returns (instrument, mpath, mtime, open_t, close_t, (d0, d1)).
+    """
+    st.session_state.setdefault("custom_instruments", {})
+    st.header("Data")
+    names = list(PATHS.keys()) + list(st.session_state["custom_instruments"].keys())
+    choice = st.selectbox("Instrument", names + ["➕ Upload new instrument…"],
+                          key=f"{key}_inst")
+
+    if choice == "➕ Upload new instrument…":
+        nm = st.text_input("Instrument name (e.g. XAUUSD, NQ)", key=f"{key}_nm")
+        f  = st.file_uploader("Minute CSV — columns: date, open, high, low, close",
+                              type="csv", key=f"{key}_nf")
+        if nm and f is not None:
+            path = os.path.join(HERE, "analysis", f"_inst_{nm.replace(' ', '_')}.csv")
+            with open(path, "wb") as fh:
+                fh.write(f.getbuffer())
+            st.session_state["custom_instruments"][nm] = path
+            st.success(f"Added {nm}. Select it above.")
+            st.rerun()
+        st.info("Name the instrument and upload its minute CSV to add it.")
+        st.stop()
+
+    mpath = PATHS.get(choice) or st.session_state["custom_instruments"].get(choice)
+    if not mpath or not os.path.exists(mpath):
+        st.warning(f"No data file for {choice}.")
+        st.stop()
+    mtime = os.path.getmtime(mpath)
+
+    open_t = get_open_t(mpath, mtime)
+    sq = st.time_input("Square-off (force exit)", value=dtime(15, 15), key=f"{key}_sq")
+    close_t = sq.hour * 60 + sq.minute
+    st.caption(f"Session open auto-detected **{open_t//60:02d}:{open_t%60:02d}** · "
+               f"IB = first 60 min · square-off **{sq.strftime('%H:%M')}** (no overnight carry)")
+
+    dmin, dmax = get_date_bounds(mpath, mtime)
+    dr = st.date_input("Date range", value=(dmin, dmax),
+                       min_value=dmin, max_value=dmax, key=f"{key}_dates")
+    d0, d1 = (dr if isinstance(dr, (tuple, list)) and len(dr) == 2 else (dmin, dmax))
+    return choice, mpath, mtime, open_t, close_t, (d0, d1)
+
+
+def _filter_prepped(prepped, d0, d1):
+    return {dow: [r for r in lst if d0 <= r["date"].date() <= d1]
+            for dow, lst in prepped.items()}
+
+
 # ─── day-wise IB retracement mode ─────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def prep_daywise(instrument, mpath, mtime):
+def prep_daywise(instrument, mpath, mtime, open_t, close_t):
     mdf = load_min(mpath, mtime)
-    return daywise.prep_days(mdf)
+    return daywise.prep_days(mdf, open_t, close_t)
 
 
 DW_FIELDS = ["trade", "entry", "stop", "tp1", "tp2", "min_size", "max_size",
@@ -331,17 +404,14 @@ def daywise_mode():
     _dw_init_state()
 
     with st.sidebar:
-        st.header("Data")
-        instrument = st.radio("Instrument", list(PATHS.keys()), key="dw_instrument")
-        up = st.file_uploader(f"Override {instrument} CSV", type="csv", key="dw_upload")
-
-    mpath = resolve_path(instrument, up)
-    if not mpath or not os.path.exists(mpath):
-        st.warning(f"No minute CSV found for {instrument}. Upload one in the sidebar.")
-        st.stop()
+        instrument, mpath, mtime, open_t, close_t, (d0, d1) = data_sidebar("dw")
 
     with st.spinner(f"Indexing {instrument} minute data (first run is cached)…"):
-        prepped = prep_daywise(instrument, mpath, os.path.getmtime(mpath))
+        prepped = prep_daywise(instrument, mpath, mtime, open_t, close_t)
+    prepped = _filter_prepped(prepped, d0, d1)
+    if not any(prepped.values()):
+        st.warning("No trading days in the selected date range.")
+        st.stop()
 
     # ── per-weekday config panels ─────────────────────────────────────────────
     st.subheader("Day-wise configuration")
@@ -501,21 +571,18 @@ def main():
                "permutation optimizer to find the best configuration")
 
     with st.sidebar:
-        st.header("Data")
-        instrument = st.radio("Instrument", list(PATHS.keys()))
+        instrument, mpath, mtime, open_t, close_t, (d0, d1) = data_sidebar("edge")
         setup = st.radio("Setup", ["IB (60 min)", "ORB (15 min)"])
         tag = "ib" if setup.startswith("IB") else "orb"
-        up = st.file_uploader(f"Override {instrument} CSV", type="csv")
         st.markdown(EDGE_NOTE)
 
-    mpath = resolve_path(instrument, up)
-    if not mpath or not os.path.exists(mpath):
-        st.warning(f"No minute CSV found for {instrument}. Upload one in the sidebar.")
-        st.stop()
-
     with st.spinner(f"Indexing {instrument} {setup} (first run is cached)…"):
-        P = build_passage(instrument, tag, mpath, os.path.getmtime(mpath),
-                          os.path.getmtime(FACTS))
+        P = build_passage(instrument, tag, mpath, mtime, open_t, close_t)
+
+    P = P[(P["date"] >= pd.Timestamp(d0)) & (P["date"] <= pd.Timestamp(d1))].reset_index(drop=True)
+    if P.empty:
+        st.warning("No trading days in the selected date range.")
+        st.stop()
 
     tab1, tab2 = st.tabs(["🎯 Single Strategy", "🔬 Optimizer (permutations)"])
 
