@@ -19,7 +19,7 @@ guard, to surface the highest-probability configurations.
 Data:  C:\\NIFTY 50_minute.csv , C:\\NIFTY BANK_minute.csv  (auto-loaded)
        analysis/facts.csv  (build_facts.py) — for the day classifications
 """
-import os, itertools
+import os, itertools, json
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -336,21 +336,77 @@ def prep_daywise(instrument, mpath, mtime, open_t, close_t):
     return daywise.prep_days(mdf, open_t, close_t)
 
 
-DW_FIELDS = ["trade", "entry", "stop", "tp1", "tp2", "min_size", "max_size",
-             "allow_long", "allow_short", "cutoff_on", "cutoff_t"]
+PRESETS_FILE = os.path.join(HERE, "analysis", "daywise_presets.json")
+SHARED_NUM = ["entry", "stop", "tp1", "tp2"]
+DIR_NUM = [f"{p}_{x}" for p in ("long", "short") for x in ("entry", "stop", "tp1", "tp2")]
+DW_FIELDS = (["trade", "allow_long", "allow_short", "separate",
+              "min_size", "max_size", "cutoff_on", "cutoff_t"] + SHARED_NUM + DIR_NUM)
 
 
-def _dw_init_state():
-    """Seed per-weekday widget state from DEFAULT_CONFIG once."""
+def _load_presets():
+    if os.path.exists(PRESETS_FILE):
+        try:
+            return json.load(open(PRESETS_FILE, encoding="utf-8"))
+        except Exception:
+            pass
+    return {"presets": {}, "last": None}
+
+
+def _save_presets(data):
+    os.makedirs(os.path.dirname(PRESETS_FILE), exist_ok=True)
+    json.dump(data, open(PRESETS_FILE, "w", encoding="utf-8"), indent=2, default=str)
+
+
+def _dw_seed_defaults():
+    """setdefault every per-weekday widget key from DEFAULT_CONFIG (fills any gaps)."""
     for day in daywise.WEEKDAYS:
         d = daywise.DEFAULT_CONFIG[day]
-        for f in ["trade", "entry", "stop", "tp1", "tp2", "min_size",
-                  "max_size", "allow_long", "allow_short"]:
+        for f in ["trade", "allow_long", "allow_short"]:
             st.session_state.setdefault(f"dw_{day}_{f}", d[f])
+        st.session_state.setdefault(f"dw_{day}_separate", False)
+        for f in SHARED_NUM:
+            st.session_state.setdefault(f"dw_{day}_{f}", d[f])
+        for p in ("long", "short"):
+            for x in ("entry", "stop", "tp1", "tp2"):
+                st.session_state.setdefault(f"dw_{day}_{p}_{x}", d[x])
+        st.session_state.setdefault(f"dw_{day}_min_size", d["min_size"])
+        st.session_state.setdefault(f"dw_{day}_max_size", d["max_size"])
         st.session_state.setdefault(f"dw_{day}_cutoff_on", d["cutoff"] is not None)
         st.session_state.setdefault(f"dw_{day}_cutoff_t",
                                     dtime(d["cutoff"] // 60, d["cutoff"] % 60)
                                     if d["cutoff"] else dtime(13, 0))
+
+
+def _dw_apply_config(configs):
+    """Write a saved 5-day config dict back into the widget session_state keys."""
+    for day, c in configs.items():
+        if day not in daywise.WEEKDAYS:
+            continue
+        st.session_state[f"dw_{day}_trade"]       = c.get("trade", True)
+        st.session_state[f"dw_{day}_allow_long"]  = c.get("allow_long", True)
+        st.session_state[f"dw_{day}_allow_short"] = c.get("allow_short", False)
+        st.session_state[f"dw_{day}_separate"]    = c.get("separate", False)
+        for f in SHARED_NUM:
+            st.session_state[f"dw_{day}_{f}"] = c.get(f, 0)
+        for p in ("long", "short"):
+            for x in ("entry", "stop", "tp1", "tp2"):
+                st.session_state[f"dw_{day}_{p}_{x}"] = c.get(f"{p}_{x}", c.get(x, 0))
+        st.session_state[f"dw_{day}_min_size"] = c.get("min_size", 0.0)
+        st.session_state[f"dw_{day}_max_size"] = c.get("max_size", 5.0)
+        cutoff = c.get("cutoff")
+        st.session_state[f"dw_{day}_cutoff_on"] = cutoff is not None
+        st.session_state[f"dw_{day}_cutoff_t"] = (dtime(int(cutoff) // 60, int(cutoff) % 60)
+                                                  if cutoff else dtime(13, 0))
+
+
+def _dw_init_state():
+    """On first load, restore the last-saved config from disk; then fill any gaps."""
+    if not st.session_state.get("dw_init_done"):
+        data = _load_presets()
+        if data.get("last"):
+            _dw_apply_config(data["last"])
+        st.session_state["dw_init_done"] = True
+    _dw_seed_defaults()
 
 
 def _dw_read_config():
@@ -361,29 +417,45 @@ def _dw_read_config():
         if g("cutoff_on"):
             t = g("cutoff_t")
             cutoff = t.hour * 60 + t.minute
-        cfg[day] = dict(trade=g("trade"), entry=g("entry"), stop=g("stop"),
-                        tp1=g("tp1"), tp2=g("tp2"), min_size=g("min_size"),
-                        max_size=g("max_size"), allow_long=g("allow_long"),
-                        allow_short=g("allow_short"), cutoff=cutoff)
+        c = dict(trade=g("trade"), allow_long=g("allow_long"), allow_short=g("allow_short"),
+                 separate=g("separate"),
+                 entry=g("entry"), stop=g("stop"), tp1=g("tp1"), tp2=g("tp2"),
+                 min_size=g("min_size"), max_size=g("max_size"), cutoff=cutoff)
+        for p in ("long", "short"):
+            for x in ("entry", "stop", "tp1", "tp2"):
+                c[f"{p}_{x}"] = g(f"{p}_{x}")
+        cfg[day] = c
     return cfg
+
+
+def _dw_param_row(day, pfx):
+    r = st.columns(4)
+    r[0].number_input("Entry retr %", 0, 100, key=f"dw_{day}_{pfx}entry", step=5,
+                      help="Retracement entry level. 0 = enter at the IB boundary (breakout).")
+    r[1].number_input("Stop retr %", 0, 200, key=f"dw_{day}_{pfx}stop", step=5,
+                      help="Deeper retracement; must exceed entry %. 100 = opposite IB boundary.")
+    r[2].number_input("Target 1 (ext %)", 0, 500, key=f"dw_{day}_{pfx}tp1", step=5,
+                      help="First target (extension beyond the boundary). Half position exits here.")
+    r[3].number_input("Target 2 (ext %)", 0, 500, key=f"dw_{day}_{pfx}tp2", step=5,
+                      help="Second target for the runner (stop → breakeven after TP1).")
 
 
 def _dw_weekday_panel(day):
     d = st.session_state
-    top = st.columns([1.2, 1, 1])
+    top = st.columns([1.1, 1, 1, 1.5])
     top[0].toggle("Trade this day", key=f"dw_{day}_trade")
     top[1].toggle("Allow long", key=f"dw_{day}_allow_long")
     top[2].toggle("Allow short", key=f"dw_{day}_allow_short")
+    top[3].toggle("Separate long/short SL & targets", key=f"dw_{day}_separate")
 
-    r1 = st.columns(4)
-    r1[0].number_input("Entry retr %", 0, 100, key=f"dw_{day}_entry", step=5,
-                       help="Retracement entry level. 0 = enter at the IB boundary (breakout).")
-    r1[1].number_input("Stop retr %", 0, 200, key=f"dw_{day}_stop", step=5,
-                       help="Deeper retracement. Must be greater than entry %. 100 = opposite IB boundary.")
-    r1[2].number_input("Target 1 (ext %)", 0, 500, key=f"dw_{day}_tp1", step=5,
-                       help="First profit target, extension beyond the boundary. Half position exits here.")
-    r1[3].number_input("Target 2 (ext %)", 0, 500, key=f"dw_{day}_tp2", step=5,
-                       help="Second target for the runner (stop moves to breakeven after TP1).")
+    sep = d[f"dw_{day}_separate"]
+    if not sep:
+        _dw_param_row(day, "")
+    else:
+        st.markdown("**Long** — entry/stop off IB High, targets above")
+        _dw_param_row(day, "long_")
+        st.markdown("**Short** — entry/stop off IB Low, targets below")
+        _dw_param_row(day, "short_")
 
     r2 = st.columns(4)
     r2[0].number_input("Min IB size %", 0.0, 10.0, key=f"dw_{day}_min_size", step=0.1,
@@ -393,8 +465,16 @@ def _dw_weekday_panel(day):
     r2[3].time_input("Cutoff time", key=f"dw_{day}_cutoff_t",
                      disabled=not d[f"dw_{day}_cutoff_on"])
 
-    if d[f"dw_{day}_stop"] <= d[f"dw_{day}_entry"]:
-        st.warning("Stop % must be greater than entry % — this day will be skipped.")
+    bad = lambda pfx: d[f"dw_{day}_{pfx}stop"] <= d[f"dw_{day}_{pfx}entry"]
+    if not sep:
+        if bad(""):
+            st.warning("Stop % must be greater than entry % — this day will be skipped.")
+    else:
+        msgs = [p for p, pfx in (("long", "long_"), ("short", "short_"))
+                if d[f"dw_{day}_allow_{p}"] and bad(pfx)]
+        if msgs:
+            st.warning(f"Stop % must exceed entry % for {', '.join(msgs)} — "
+                       "those trades will be skipped.")
 
 
 def daywise_mode():
@@ -413,21 +493,47 @@ def daywise_mode():
         st.warning("No trading days in the selected date range.")
         st.stop()
 
-    # ── per-weekday config panels ─────────────────────────────────────────────
+    # ── save / load settings ──────────────────────────────────────────────────
     st.subheader("Day-wise configuration")
+    presets = _load_presets()
+    with st.expander("💾 Save / Load settings", expanded=False):
+        s = st.columns([2, 1, 2, 1, 1])
+        pname = s[0].text_input("Preset name", key="dw_preset_name",
+                                placeholder="e.g. my-nifty-setup")
+        if s[1].button("Save", use_container_width=True):
+            if pname.strip():
+                cfgs = _dw_read_config()
+                presets["presets"][pname.strip()] = cfgs
+                presets["last"] = cfgs
+                _save_presets(presets)
+                st.success(f"Saved preset '{pname.strip()}'.")
+            else:
+                st.warning("Enter a preset name first.")
+        names = list(presets.get("presets", {}).keys())
+        sel = s[2].selectbox("Saved presets", ["—"] + names, key="dw_preset_sel")
+        if s[3].button("Load", use_container_width=True) and sel != "—":
+            _dw_apply_config(presets["presets"][sel])
+            presets["last"] = presets["presets"][sel]
+            _save_presets(presets)
+            st.rerun()
+        if s[4].button("Delete", use_container_width=True) and sel != "—":
+            presets["presets"].pop(sel, None)
+            _save_presets(presets)
+            st.rerun()
+        st.caption("Settings auto-restore on next launch. Saved to "
+                   "`analysis/daywise_presets.json`.")
+
     cc = st.columns([1, 1, 3])
     if cc[0].button("📋 Copy Monday → all days", use_container_width=True):
-        src = {f: st.session_state[f"dw_Monday_{f}"] for f in
-               ["entry", "stop", "tp1", "tp2", "min_size", "max_size",
-                "allow_long", "allow_short", "trade", "cutoff_on", "cutoff_t"]}
         for day in daywise.WEEKDAYS:
-            for f, v in src.items():
-                st.session_state[f"dw_{day}_{f}"] = v
+            for f in DW_FIELDS:
+                st.session_state[f"dw_{day}_{f}"] = st.session_state[f"dw_Monday_{f}"]
         st.rerun()
     if cc[1].button("↺ Reset to defaults", use_container_width=True):
         for day in daywise.WEEKDAYS:
             for f in DW_FIELDS:
                 st.session_state.pop(f"dw_{day}_{f}", None)
+        st.session_state["dw_init_done"] = False
         st.rerun()
 
     for day in daywise.WEEKDAYS:
@@ -436,8 +542,12 @@ def daywise_mode():
         if not cfg["trade"]: flags.append("off")
         if cfg["allow_long"]: flags.append("long")
         if cfg["allow_short"]: flags.append("short")
-        label = f"{day}  ·  entry {cfg['entry']}% / stop {cfg['stop']}% · " \
-                f"TP {cfg['tp1']}%/{cfg['tp2']}% · {'/'.join(flags) or 'no direction'}"
+        if cfg.get("separate"):
+            params = (f"L {cfg['long_entry']}/{cfg['long_stop']}→{cfg['long_tp1']}/{cfg['long_tp2']} · "
+                      f"S {cfg['short_entry']}/{cfg['short_stop']}→{cfg['short_tp1']}/{cfg['short_tp2']}")
+        else:
+            params = f"entry {cfg['entry']}% / stop {cfg['stop']}% · TP {cfg['tp1']}%/{cfg['tp2']}%"
+        label = f"{day}  ·  {params} · {'/'.join(flags) or 'no direction'}"
         with st.expander(label, expanded=(day == "Monday")):
             _dw_weekday_panel(day)
 
@@ -446,6 +556,8 @@ def daywise_mode():
 
     if run:
         configs = _dw_read_config()
+        presets["last"] = configs          # auto-persist most recent config
+        _save_presets(presets)
         trades = daywise.run(prepped, configs)
         _dw_show_results(instrument, trades)
 
@@ -477,13 +589,18 @@ def daywise_mode():
             st.markdown(f"**Top configs for {od}** (showing 20)")
             st.dataframe(res.head(20), use_container_width=True, hide_index=True)
             best = res.iloc[0]
-            if st.button(f"✅ Apply best {od} config to the panel above"):
-                st.session_state[f"dw_{od}_entry"] = int(best["entry"])
-                st.session_state[f"dw_{od}_stop"] = int(best["stop"])
-                st.session_state[f"dw_{od}_tp1"] = int(best["tp1"])
-                st.session_state[f"dw_{od}_tp2"] = int(best["tp2"])
-                st.session_state[f"dw_{od}_allow_long"] = best["direction"] == "long"
-                st.session_state[f"dw_{od}_allow_short"] = best["direction"] == "short"
+            bdir = best["direction"]
+            if st.button(f"✅ Apply best {od} config ({bdir}) to the panel above"):
+                if st.session_state.get(f"dw_{od}_separate"):
+                    # write into that direction's own params; leave the other side intact
+                    for x in ("entry", "stop", "tp1", "tp2"):
+                        st.session_state[f"dw_{od}_{bdir}_{x}"] = int(best[x])
+                    st.session_state[f"dw_{od}_allow_{bdir}"] = True
+                else:
+                    for x in ("entry", "stop", "tp1", "tp2"):
+                        st.session_state[f"dw_{od}_{x}"] = int(best[x])
+                    st.session_state[f"dw_{od}_allow_long"] = bdir == "long"
+                    st.session_state[f"dw_{od}_allow_short"] = bdir == "short"
                 st.session_state[f"dw_{od}_trade"] = True
                 del st.session_state["dw_opt_result"]
                 st.rerun()

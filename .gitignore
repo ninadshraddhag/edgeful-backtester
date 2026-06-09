@@ -5,3 +5,4 @@ analysis/facts.parquet
 analysis/_uploaded_*.csv
 .streamlit/
 logs/
+analysis/daywise_presets.json

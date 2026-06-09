@@ -155,6 +155,20 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff):
     return pnl, outcome, entry
 
 
+def dir_params(cfg, is_long):
+    """
+    Entry/stop/tp1/tp2 for one direction. If cfg['separate'] is set, long and short
+    use their own long_*/short_* values; otherwise both use the shared entry/stop/tp1/tp2.
+    """
+    if cfg.get("separate"):
+        p = "long" if is_long else "short"
+        return (cfg.get(f"{p}_entry", cfg["entry"]),
+                cfg.get(f"{p}_stop",  cfg["stop"]),
+                cfg.get(f"{p}_tp1",   cfg["tp1"]),
+                cfg.get(f"{p}_tp2",   cfg["tp2"]))
+    return cfg["entry"], cfg["stop"], cfg["tp1"], cfg["tp2"]
+
+
 def sim_day(rec, cfg):
     """All trades for one day under its weekday config (0, 1 or 2 directional trades)."""
     if not cfg.get("trade", True):
@@ -169,7 +183,8 @@ def sim_day(rec, cfg):
             continue
         if (not is_long) and not cfg["allow_short"]:
             continue
-        res = trade_pnl(rec, cfg["entry"], cfg["stop"], cfg["tp1"], cfg["tp2"], is_long, cutoff)
+        e, s, t1, t2 = dir_params(cfg, is_long)
+        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff)
         if res is None:
             continue
         pnl, outcome, entry = res
