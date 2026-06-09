@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import daywise
+from datetime import time as dtime
 
 st.set_page_config(page_title="ORB/IB Edge Backtester", page_icon="📈", layout="wide")
 
@@ -252,16 +254,244 @@ def resolve_path(instrument, uploaded):
     return PATHS.get(instrument)
 
 
+# ─── day-wise IB retracement mode ─────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def prep_daywise(instrument, mpath, mtime):
+    mdf = load_min(mpath, mtime)
+    return daywise.prep_days(mdf)
+
+
+DW_FIELDS = ["trade", "entry", "stop", "tp1", "tp2", "min_size", "max_size",
+             "allow_long", "allow_short", "cutoff_on", "cutoff_t"]
+
+
+def _dw_init_state():
+    """Seed per-weekday widget state from DEFAULT_CONFIG once."""
+    for day in daywise.WEEKDAYS:
+        d = daywise.DEFAULT_CONFIG[day]
+        for f in ["trade", "entry", "stop", "tp1", "tp2", "min_size",
+                  "max_size", "allow_long", "allow_short"]:
+            st.session_state.setdefault(f"dw_{day}_{f}", d[f])
+        st.session_state.setdefault(f"dw_{day}_cutoff_on", d["cutoff"] is not None)
+        st.session_state.setdefault(f"dw_{day}_cutoff_t",
+                                    dtime(d["cutoff"] // 60, d["cutoff"] % 60)
+                                    if d["cutoff"] else dtime(13, 0))
+
+
+def _dw_read_config():
+    cfg = {}
+    for day in daywise.WEEKDAYS:
+        g = lambda f: st.session_state[f"dw_{day}_{f}"]
+        cutoff = None
+        if g("cutoff_on"):
+            t = g("cutoff_t")
+            cutoff = t.hour * 60 + t.minute
+        cfg[day] = dict(trade=g("trade"), entry=g("entry"), stop=g("stop"),
+                        tp1=g("tp1"), tp2=g("tp2"), min_size=g("min_size"),
+                        max_size=g("max_size"), allow_long=g("allow_long"),
+                        allow_short=g("allow_short"), cutoff=cutoff)
+    return cfg
+
+
+def _dw_weekday_panel(day):
+    d = st.session_state
+    top = st.columns([1.2, 1, 1])
+    top[0].toggle("Trade this day", key=f"dw_{day}_trade")
+    top[1].toggle("Allow long", key=f"dw_{day}_allow_long")
+    top[2].toggle("Allow short", key=f"dw_{day}_allow_short")
+
+    r1 = st.columns(4)
+    r1[0].number_input("Entry retr %", 0, 100, key=f"dw_{day}_entry", step=5,
+                       help="Retracement entry level. 0 = enter at the IB boundary (breakout).")
+    r1[1].number_input("Stop retr %", 0, 200, key=f"dw_{day}_stop", step=5,
+                       help="Deeper retracement. Must be greater than entry %. 100 = opposite IB boundary.")
+    r1[2].number_input("Target 1 (ext %)", 0, 500, key=f"dw_{day}_tp1", step=5,
+                       help="First profit target, extension beyond the boundary. Half position exits here.")
+    r1[3].number_input("Target 2 (ext %)", 0, 500, key=f"dw_{day}_tp2", step=5,
+                       help="Second target for the runner (stop moves to breakeven after TP1).")
+
+    r2 = st.columns(4)
+    r2[0].number_input("Min IB size %", 0.0, 10.0, key=f"dw_{day}_min_size", step=0.1,
+                       help="IB range as % of price (range ÷ open × 100).")
+    r2[1].number_input("Max IB size %", 0.0, 10.0, key=f"dw_{day}_max_size", step=0.1)
+    r2[2].toggle("Entry cutoff", key=f"dw_{day}_cutoff_on")
+    r2[3].time_input("Cutoff time", key=f"dw_{day}_cutoff_t",
+                     disabled=not d[f"dw_{day}_cutoff_on"])
+
+    if d[f"dw_{day}_stop"] <= d[f"dw_{day}_entry"]:
+        st.warning("Stop % must be greater than entry % — this day will be skipped.")
+
+
+def daywise_mode():
+    st.caption("Edgeful-style day-wise IB retracement · entry/stop in % of IB range "
+               "(retracement) · targets in % of IB range (extension) · half at TP1, "
+               "runner to TP2 with stop at breakeven")
+    _dw_init_state()
+
+    with st.sidebar:
+        st.header("Data")
+        instrument = st.radio("Instrument", list(PATHS.keys()), key="dw_instrument")
+        up = st.file_uploader(f"Override {instrument} CSV", type="csv", key="dw_upload")
+
+    mpath = resolve_path(instrument, up)
+    if not mpath or not os.path.exists(mpath):
+        st.warning(f"No minute CSV found for {instrument}. Upload one in the sidebar.")
+        st.stop()
+
+    with st.spinner(f"Indexing {instrument} minute data (first run is cached)…"):
+        prepped = prep_daywise(instrument, mpath, os.path.getmtime(mpath))
+
+    # ── per-weekday config panels ─────────────────────────────────────────────
+    st.subheader("Day-wise configuration")
+    cc = st.columns([1, 1, 3])
+    if cc[0].button("📋 Copy Monday → all days", use_container_width=True):
+        src = {f: st.session_state[f"dw_Monday_{f}"] for f in
+               ["entry", "stop", "tp1", "tp2", "min_size", "max_size",
+                "allow_long", "allow_short", "trade", "cutoff_on", "cutoff_t"]}
+        for day in daywise.WEEKDAYS:
+            for f, v in src.items():
+                st.session_state[f"dw_{day}_{f}"] = v
+        st.rerun()
+    if cc[1].button("↺ Reset to defaults", use_container_width=True):
+        for day in daywise.WEEKDAYS:
+            for f in DW_FIELDS:
+                st.session_state.pop(f"dw_{day}_{f}", None)
+        st.rerun()
+
+    for day in daywise.WEEKDAYS:
+        cfg = _dw_read_config()[day]
+        flags = []
+        if not cfg["trade"]: flags.append("off")
+        if cfg["allow_long"]: flags.append("long")
+        if cfg["allow_short"]: flags.append("short")
+        label = f"{day}  ·  entry {cfg['entry']}% / stop {cfg['stop']}% · " \
+                f"TP {cfg['tp1']}%/{cfg['tp2']}% · {'/'.join(flags) or 'no direction'}"
+        with st.expander(label, expanded=(day == "Monday")):
+            _dw_weekday_panel(day)
+
+    st.divider()
+    run = st.button("▶ Run day-wise backtest", type="primary")
+
+    if run:
+        configs = _dw_read_config()
+        trades = daywise.run(prepped, configs)
+        _dw_show_results(instrument, trades)
+
+    # ── per-weekday optimizer ─────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🔬 Per-weekday optimizer — find the best config for one weekday"):
+        oc = st.columns(4)
+        opt_day = oc[0].selectbox("Weekday", daywise.WEEKDAYS, key="dw_opt_day")
+        opt_metric = oc[1].selectbox("Rank by",
+                                     ["expectancy", "win_rate", "net", "pf"], key="dw_opt_metric")
+        opt_min = oc[2].number_input("Min trades", 20, 1000, 100, 10, key="dw_opt_min")
+        opt_dirs = oc[3].multiselect("Directions", ["long", "short"],
+                                     default=["long", "short"], key="dw_opt_dirs")
+        if st.button("🔎 Optimize this weekday", key="dw_opt_run"):
+            if not opt_dirs:
+                st.warning("Pick at least one direction.")
+            else:
+                with st.spinner(f"Sweeping {opt_day} configurations…"):
+                    res = daywise.optimize_weekday(
+                        prepped[opt_day], opt_dirs, daywise.OPT_GRID,
+                        opt_metric, int(opt_min))
+                if res.empty:
+                    st.warning("No configs met the minimum-trades threshold.")
+                else:
+                    st.session_state["dw_opt_result"] = (opt_day, res)
+
+        if "dw_opt_result" in st.session_state:
+            od, res = st.session_state["dw_opt_result"]
+            st.markdown(f"**Top configs for {od}** (showing 20)")
+            st.dataframe(res.head(20), use_container_width=True, hide_index=True)
+            best = res.iloc[0]
+            if st.button(f"✅ Apply best {od} config to the panel above"):
+                st.session_state[f"dw_{od}_entry"] = int(best["entry"])
+                st.session_state[f"dw_{od}_stop"] = int(best["stop"])
+                st.session_state[f"dw_{od}_tp1"] = int(best["tp1"])
+                st.session_state[f"dw_{od}_tp2"] = int(best["tp2"])
+                st.session_state[f"dw_{od}_allow_long"] = best["direction"] == "long"
+                st.session_state[f"dw_{od}_allow_short"] = best["direction"] == "short"
+                st.session_state[f"dw_{od}_trade"] = True
+                del st.session_state["dw_opt_result"]
+                st.rerun()
+
+
+def _dw_show_results(instrument, trades):
+    st.divider()
+    if trades.empty:
+        st.warning("No trades generated. Check that days are enabled, a direction is "
+                   "allowed, and the IB-size filter isn't excluding everything.")
+        return
+
+    pnl = trades.sort_values("date")["pnl"].values
+    m = metrics(pnl)
+    st.subheader(f"{instrument} · day-wise results")
+
+    k = st.columns(6)
+    k[0].metric("Win Rate", pct(m["win_rate"]))
+    k[1].metric("Max Drawdown", f"{m['max_dd']:,.0f} pts")
+    k[2].metric("Net P&L", f"{m['net']:,.0f} pts")
+    k[3].metric("Expectancy", f"{m['expectancy']:.2f} pts/trade")
+    k[4].metric("Profit Factor", f"{m['pf']:.2f}" if np.isfinite(m["pf"]) else "∞")
+    k[5].metric("Trades", f"{m['trades']:,}")
+
+    # equity curve
+    t = trades.sort_values("date")
+    fig = go.Figure()
+    fig.add_scatter(x=pd.to_datetime(t["date"]), y=np.cumsum(t["pnl"].values),
+                    mode="lines", line=dict(color="#2196F3", width=2),
+                    fill="tozeroy", fillcolor="rgba(33,150,243,0.10)")
+    fig.update_layout(title="Equity curve (points, 1 unit / trade)", height=340,
+                      template="plotly_white", yaxis_title="cumulative pts")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # per-weekday breakdown
+    wd = (trades.groupby("dow")
+          .agg(trades=("pnl", "size"), win_rate=("win", "mean"),
+               net=("pnl", "sum"), expectancy=("pnl", "mean"))
+          .reindex([d for d in daywise.WEEKDAYS if d in trades["dow"].unique()]))
+    wd["win_rate"] = (wd["win_rate"] * 100).round(1)
+    wd[["net", "expectancy"]] = wd[["net", "expectancy"]].round(2)
+    g1, g2 = st.columns([1, 1])
+    with g1:
+        st.markdown("**By weekday**")
+        st.dataframe(wd, use_container_width=True)
+    with g2:
+        st.markdown("**Exit breakdown**")
+        oc = trades["outcome"].value_counts()
+        figp = go.Figure(go.Bar(x=oc.values, y=oc.index, orientation="h",
+                                marker_color="#4CAF50"))
+        figp.update_layout(height=260, template="plotly_white", margin=dict(t=10, b=10))
+        st.plotly_chart(figp, use_container_width=True)
+
+    with st.expander(f"Trade log ({len(trades):,})"):
+        st.dataframe(trades.sort_values("date", ascending=False),
+                     use_container_width=True, hide_index=True)
+    st.download_button("⬇ Download trades (CSV)", trades.to_csv(index=False).encode(),
+                       file_name=f"daywise_{instrument.replace(' ', '_')}.csv",
+                       mime="text/csv")
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    st.title("📈 ORB / IB Edge Backtester")
-    st.caption("Trades the probability edges · targets & stops in × opening-range · "
-               "permutation optimizer to find the best configuration")
+    st.title("📈 ORB / IB Strategy Suite")
 
     if not os.path.exists(FACTS):
         st.error("analysis/facts.csv missing — run `python build_facts.py` first.")
         st.stop()
+
+    mode = st.sidebar.radio("Mode", ["Edge Backtester", "Day-wise IB Retracement"],
+                            key="app_mode")
+    st.sidebar.divider()
+    if mode == "Day-wise IB Retracement":
+        daywise_mode()
+        return
+
+    st.caption("Trades the probability edges · targets & stops in × opening-range · "
+               "permutation optimizer to find the best configuration")
 
     with st.sidebar:
         st.header("Data")
