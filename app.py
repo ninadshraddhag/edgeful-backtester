@@ -342,8 +342,10 @@ def main():
         o = st.columns(4)
         sweep_logics = o[0].multiselect("Side logics", list(SIDE_LOGICS.keys()),
                                         default=list(SIDE_LOGICS.keys()))
-        sort_metric = o[1].selectbox("Rank by",
-                                     ["expectancy", "net", "win_rate", "pf"])
+        SORT_COLS = {"Expectancy": "expectancy", "Net P&L": "net",
+                     "Win rate": "win %", "Profit factor": "PF"}
+        sort_label  = o[1].selectbox("Rank by", list(SORT_COLS.keys()))
+        sort_metric = SORT_COLS[sort_label]
         min_trades = o[2].number_input("Min trades", 20, 2000, 100, 10)
         sweep_dow  = o[3].checkbox("Also sweep each weekday", value=False)
 
@@ -402,9 +404,8 @@ def main():
                 st.warning("No configurations met the minimum-trades threshold. Lower it.")
             else:
                 res = pd.DataFrame(results)
-                asc = sort_metric in ()           # all our metrics: higher = better
                 res = res.sort_values(sort_metric, ascending=False).reset_index(drop=True)
-                st.success(f"{len(res):,} valid configurations · showing top 40 by {sort_metric}")
+                st.success(f"{len(res):,} valid configurations · showing top 40 by {sort_label}")
                 st.dataframe(res.head(40), use_container_width=True, hide_index=True,
                              column_config={
                                  "win %": st.column_config.NumberColumn(format="%.1f"),
