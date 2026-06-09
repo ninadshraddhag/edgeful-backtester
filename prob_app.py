@@ -22,7 +22,8 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="ORB/IB Probability Explorer", page_icon="🎲", layout="wide")
+# NOTE: set_page_config is NOT called at import time so this module can be embedded
+# as a mode inside app.py. It is only set when run standalone (see _standalone()).
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
 FACTS  = os.path.join(HERE, "analysis", "facts.csv")
@@ -125,7 +126,7 @@ def gap_pd_table(s):
 
 # ─── app ──────────────────────────────────────────────────────────────────────
 
-def main():
+def render():
     st.title("🎲 ORB / IB Probability Explorer")
     st.caption("10 years · NIFTY 50 & BANK NIFTY · set filters to ask a question, or type one below")
 
@@ -397,5 +398,10 @@ def main():
                        file_name="prob_slice.csv", mime="text/csv")
 
 
+def _standalone():
+    st.set_page_config(page_title="ORB/IB Probability Explorer", page_icon="🎲", layout="wide")
+    render()
+
+
 if __name__ == "__main__":
-    main()
+    _standalone()

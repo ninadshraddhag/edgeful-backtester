@@ -25,9 +25,10 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import daywise
+import prob_app
 from datetime import time as dtime
 
-st.set_page_config(page_title="ORB/IB Edge Backtester", page_icon="📈", layout="wide")
+st.set_page_config(page_title="ORB/IB Strategy Suite", page_icon="📈", layout="wide")
 
 HERE  = os.path.dirname(os.path.abspath(__file__))
 FACTS = os.path.join(HERE, "analysis", "facts.csv")
@@ -477,15 +478,21 @@ def _dw_show_results(instrument, trades):
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    st.title("📈 ORB / IB Strategy Suite")
-
     if not os.path.exists(FACTS):
+        st.title("📈 ORB / IB Strategy Suite")
         st.error("analysis/facts.csv missing — run `python build_facts.py` first.")
         st.stop()
 
-    mode = st.sidebar.radio("Mode", ["Edge Backtester", "Day-wise IB Retracement"],
-                            key="app_mode")
+    mode = st.sidebar.radio(
+        "Mode",
+        ["Edge Backtester", "Day-wise IB Retracement", "Probabilities"],
+        key="app_mode")
     st.sidebar.divider()
+    if mode == "Probabilities":
+        prob_app.render()
+        return
+
+    st.title("📈 ORB / IB Strategy Suite")
     if mode == "Day-wise IB Retracement":
         daywise_mode()
         return
