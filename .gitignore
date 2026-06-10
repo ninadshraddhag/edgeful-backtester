@@ -6,3 +6,5 @@ analysis/_uploaded_*.csv
 .streamlit/
 logs/
 analysis/daywise_presets.json
+live_config.json
+analysis/_inst_*.csv

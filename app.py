@@ -27,6 +27,8 @@ import plotly.graph_objects as go
 import daywise
 import prob_app
 import build_facts
+import live_feed
+import live_stats
 from datetime import time as dtime
 
 st.set_page_config(page_title="ORB/IB Strategy Suite", page_icon="📈", layout="wide")
@@ -662,6 +664,225 @@ def _dw_show_results(instrument, trades):
                        mime="text/csv")
 
 
+# ─── live market statistics mode ──────────────────────────────────────────────
+
+LIVE_CFG = os.path.join(HERE, "live_config.json")
+
+
+def _load_live_cfg():
+    if os.path.exists(LIVE_CFG):
+        try:
+            return json.load(open(LIVE_CFG, encoding="utf-8"))
+        except Exception:
+            pass
+    return {"dhan": {"client_id": "", "access_token": ""}, "instruments": {}}
+
+
+def _save_live_cfg(cfg):
+    json.dump(cfg, open(LIVE_CFG, "w", encoding="utf-8"), indent=2)
+
+
+def _badge(label, value, tone="#455A64"):
+    return (f"<span style='background:{tone};color:#fff;padding:3px 10px;"
+            f"border-radius:12px;font-size:0.85em;margin-right:6px;white-space:nowrap'>"
+            f"{label}: <b>{value}</b></span>")
+
+
+def _live_render(instrument, feat, probs, open_t):
+    ist = pd.Timestamp.now(tz="Asia/Kolkata")
+    st.markdown(f"#### {instrument} &nbsp;·&nbsp; {feat.get('phase','—')} "
+                f"&nbsp;·&nbsp; {ist.strftime('%H:%M:%S')} IST")
+
+    if "day_open" not in feat:
+        st.info("Session not started yet (pre-open). Levels will populate after the open.")
+        return
+
+    # ── day-forming badges ────────────────────────────────────────────────────
+    gtone = {"Gap Up": "#2E7D32", "Gap Down": "#C62828", "Flat": "#455A64"}.get(feat.get("gap_type"), "#455A64")
+    badges = [_badge("Day", feat["dow"]),
+              _badge("Price", f"{feat['price']:.1f}")]
+    if feat.get("gap_type"):
+        badges.append(_badge("Gap", f"{feat['gap_type']} ({feat['gap_pct']:+.2f}%)", gtone))
+    if feat.get("ib_first_side"):
+        side = feat["ib_first_side"].upper()
+        badges.append(_badge("IB first", f"{side} formed first",
+                             "#2E7D32" if side == "LOW" else "#C62828"))
+        badges.append(_badge("IB size", f"{feat['ib_size_pct']:.2f}% of price"))
+    for lab, key in [("PDH", "broke_pdh"), ("PDL", "broke_pdl"),
+                     ("IB-H", "broke_ib_high"), ("IB-L", "broke_ib_low")]:
+        if key in feat:
+            hit = feat[key]
+            badges.append(_badge(lab, "BROKEN" if hit else "intact",
+                                 "#6A1B9A" if hit else "#455A64"))
+    st.markdown(" ".join(badges), unsafe_allow_html=True)
+
+    if "ib_first_side" not in feat:
+        st.info("IB (first 60 min) still forming — full probabilities unlock at "
+                f"{(open_t+60)//60:02d}:{(open_t+60)%60:02d}. Showing gap-only stats below.")
+
+    # ── live probability cards ────────────────────────────────────────────────
+    st.markdown("##### Live probabilities — historical odds for this exact day type")
+    s = probs.get("matched") or probs.get("gap_slice")
+    nlab = probs.get("n_matched", probs.get("n_gap", 0))
+    if s:
+        c = st.columns(5)
+        c[0].metric("IB HIGH breaks", pct(s["high"]))
+        c[1].metric("IB LOW breaks", pct(s["low"]))
+        c[2].metric("BOTH sides", pct(s["both"]))
+        c[3].metric("ONE side", pct(s["one"]))
+        c[4].metric("Sample days", f"{nlab:,}")
+        if "fade_opp_break" in probs:
+            fs = feat["ib_first_side"].upper(); opp = probs["fade_opp"].upper()
+            st.success(f"**First-move-fade:** {fs} formed first → **{pct(probs['fade_opp_break'])} "
+                       f"chance the {opp} breaks** (breaks first {pct(probs.get('fade_opp_first',0))}), "
+                       f"n={probs.get('n_matched',0):,}.")
+        if nlab < 30:
+            st.warning(f"⚠ Only {nlab} historical matches — low confidence.")
+
+    # ── PDH/PDL reach for today's gap ─────────────────────────────────────────
+    pdt = probs.get("pd_table")
+    if pdt is not None and not pdt.empty and feat.get("gap_type"):
+        row = pdt[pdt["Gap"] == feat["gap_type"]]
+        if not row.empty:
+            r = row.iloc[0]
+            cc = st.columns(2)
+            cc[0].metric(f"{feat['gap_type']} → reach PDH", f"{r['reach PDH %']:.1f}%")
+            cc[1].metric(f"{feat['gap_type']} → reach PDL", f"{r['reach PDL %']:.1f}%")
+
+    # ── today's levels + extension targets ────────────────────────────────────
+    rows = []
+    if feat.get("ib_high"):
+        rows += [("IB High", feat["ib_high"]), ("IB Low", feat["ib_low"])]
+    if feat.get("orb_high"):
+        rows += [("ORB High", feat["orb_high"]), ("ORB Low", feat["orb_low"])]
+    if feat.get("prev_high"):
+        rows += [("PDH", feat["prev_high"]), ("PDL", feat["prev_low"]),
+                 ("Prev close", feat["prev_close"])]
+    if rows:
+        lv = pd.DataFrame(rows, columns=["Level", "Price"]).round(1)
+        ext = probs.get("ext")
+        cL, cR = st.columns(2)
+        with cL:
+            st.markdown("**Today's key levels**")
+            st.dataframe(lv, use_container_width=True, hide_index=True)
+        with cR:
+            if ext:
+                st.markdown("**Extension targets — price & historical reach %**")
+                et = pd.DataFrame([{
+                    "× range": e["level"],
+                    "Bull @": round(e["up_price"], 1),
+                    "reach %": None if e["up_p"] is None else round(e["up_p"] * 100, 1),
+                    "Bear @": round(e["dn_price"], 1),
+                    "reach %.": None if e["dn_p"] is None else round(e["dn_p"] * 100, 1),
+                } for e in ext])
+                st.dataframe(et, use_container_width=True, hide_index=True)
+
+    # ── today's day-wise retracement plan (from saved preset) ─────────────────
+    if feat.get("ib_high"):
+        presets = _load_presets()
+        cfg_all = presets.get("last") or daywise.DEFAULT_CONFIG
+        cfg = cfg_all.get(feat["dow"], daywise.DEFAULT_CONFIG[feat["dow"]])
+        H, L, Rg = feat["ib_high"], feat["ib_low"], feat["ib_range"]
+        plan = []
+        for is_long, allow in [(True, cfg.get("allow_long")), (False, cfg.get("allow_short"))]:
+            if not allow:
+                continue
+            e, s_, t1, t2 = daywise.dir_params(cfg, is_long)
+            if is_long:
+                plan.append(["LONG", H - e/100*Rg, H - s_/100*Rg, H + t1/100*Rg, H + t2/100*Rg])
+            else:
+                plan.append(["SHORT", L + e/100*Rg, L + s_/100*Rg, L - t1/100*Rg, L - t2/100*Rg])
+        if plan:
+            st.markdown(f"**Your day-wise plan for {feat['dow']} (from saved preset)**")
+            st.dataframe(pd.DataFrame(plan, columns=["Dir", "Entry", "Stop", "TP1", "TP2"]).round(1),
+                         use_container_width=True, hide_index=True)
+
+    st.caption("Probabilities are historical frequencies for matching days (10-yr) — "
+               "not guarantees. Treat thin samples and rare day-types with caution.")
+
+
+def live_mode():
+    st.title("📡 Live Market Statistics")
+    st.caption("Classifies the day as it forms and shows live conditional probabilities "
+               "from the 10-year history.")
+    cfg = _load_live_cfg()
+
+    with st.sidebar:
+        st.header("Live data")
+        source_kind = st.radio("Source", ["Demo replay", "Dhan (live)"], key="live_src")
+        instrument = st.selectbox("Instrument", list(PATHS.keys()), key="live_inst")
+        mpath = PATHS[instrument]
+        mtime = os.path.getmtime(mpath)
+        open_t = get_open_t(mpath, mtime)
+
+        if source_kind == "Dhan (live)":
+            cid = st.text_input("Dhan client_id", value=cfg["dhan"].get("client_id", ""),
+                                key="live_cid")
+            tok = st.text_input("Dhan access_token", value=cfg["dhan"].get("access_token", ""),
+                                type="password", key="live_tok")
+            if st.button("💾 Save credentials"):
+                cfg["dhan"] = {"client_id": cid.strip(), "access_token": tok.strip()}
+                _save_live_cfg(cfg)
+                st.success("Saved to live_config.json (gitignored).")
+            auto = st.toggle("Auto-refresh every 60s", value=True, key="live_auto")
+            asof_t = None
+            asof_date = None
+        else:
+            full = load_min(mpath, mtime)
+            days = sorted(full["date_only"].unique())
+            asof_date = st.date_input("Replay date", value=days[-1],
+                                      min_value=days[0], max_value=days[-1], key="live_date")
+            asof_t = st.slider("As-of time (minute of day)", open_t, 15 * 60 + 15,
+                               11 * 60, 5, key="live_asof")
+            st.caption(f"Replaying up to {asof_t//60:02d}:{asof_t%60:02d}")
+            auto = False
+
+    # facts for this instrument
+    fn = load_facts(os.path.getmtime(FACTS))
+    fn = fn[fn["instrument"] == instrument].copy()
+
+    # build the data source
+    if source_kind == "Dhan (live)":
+        if not (cfg["dhan"].get("client_id") and cfg["dhan"].get("access_token")):
+            st.warning("Enter your Dhan client_id and access_token in the sidebar, then Save. "
+                       "Get them from web.dhan.co → Profile → Access DhanHQ APIs.  "
+                       "Install the SDK with:  `pip install dhanhq`")
+            return
+        try:
+            source = live_feed.DhanSource(cfg["dhan"]["client_id"], cfg["dhan"]["access_token"],
+                                          instruments=cfg.get("instruments") or None)
+        except Exception as e:
+            st.error(f"Could not initialise Dhan: {e}")
+            return
+        now_t = None
+    else:
+        source = live_feed.DemoSource(load_min(mpath, mtime), asof_date, asof_t)
+        now_t = asof_t
+
+    run_every = "60s" if (source_kind == "Dhan (live)" and auto) else None
+
+    @st.fragment(run_every=run_every)
+    def panel():
+        try:
+            today = source.today_minutes(instrument)
+            prev = source.prev_day(instrument)
+        except Exception as e:
+            st.error(f"Data fetch failed: {e}")
+            return
+        nt = now_t
+        if nt is None:
+            ist = pd.Timestamp.now(tz="Asia/Kolkata")
+            nt = min(ist.hour * 60 + ist.minute, 15 * 60 + 15)
+        feat = live_stats.classify_live(today, prev, open_t, 15 * 60 + 15, now_t=nt)
+        probs = live_stats.live_probabilities(fn, feat)
+        _live_render(instrument, feat, probs, open_t)
+
+    panel()
+    if run_every is None and source_kind == "Dhan (live)":
+        if st.button("🔄 Refresh now"):
+            st.rerun()
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -672,11 +893,15 @@ def main():
 
     mode = st.sidebar.radio(
         "Mode",
-        ["Edge Backtester", "Day-wise IB Retracement", "Probabilities"],
+        ["Edge Backtester", "Day-wise IB Retracement", "Probabilities",
+         "Live Market Statistics"],
         key="app_mode")
     st.sidebar.divider()
     if mode == "Probabilities":
         prob_app.render()
+        return
+    if mode == "Live Market Statistics":
+        live_mode()
         return
 
     st.title("📈 ORB / IB Strategy Suite")
