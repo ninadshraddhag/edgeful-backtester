@@ -447,6 +447,16 @@ def build_live_pdf(instrument, feat, probs, plan_rows):
                   f"{probs['fade_opp'].upper()} broke {probs['fade_opp_break'] * 100:.1f}% "
                   f"of the time (and broke FIRST {probs.get('fade_opp_first', 0) * 100:.1f}% "
                   f"of the time). Sample: {probs.get('n_matched', 0):,} days.", style="B")
+        mid = probs.get("mid")
+        if mid and mid.get("prob") is not None:
+            where = "above" if mid["close_above_mid"] else "below"
+            tag = "CONFIRMS" if mid["confirmed"] else "does NOT confirm"
+            _para(pdf,
+                  f"MIDPOINT CONFIRMATION - The IB closed {where} its midpoint, which {tag} "
+                  f"the fade. On matching days that also closed {where} the midpoint, the "
+                  f"{mid['opp'].upper()} broke {mid['prob'] * 100:.1f}% of the time "
+                  f"(vs {mid['base'] * 100:.1f}% for all matching days; n={mid['n']:,}).",
+                  style="B")
         if n < 30:
             _para(pdf, f"CAUTION: only {n} matching historical days - low confidence.",
                   style="BI", size=8.5)

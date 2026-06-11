@@ -58,9 +58,12 @@ def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None,
     if now_t >= ib_end and len(ib) >= min(20, max(5, int(ib_min * 0.66))):
         ih, il = float(ib["high"].max()), float(ib["low"].min())
         rg = ih - il
+        ib_close = float(ib.iloc[-1]["close"])
         feat.update(ib_high=ih, ib_low=il, ib_range=rg,
                     ib_size_pct=round(rg / feat["day_open"] * 100, 3) if feat["day_open"] else None,
-                    ib_first_side=build_facts._first_extreme_side(ib, ih, il))
+                    ib_first_side=build_facts._first_extreme_side(ib, ih, il),
+                    ib_close=ib_close, ib_mid=(ih + il) / 2,
+                    ib_close_above_mid=bool(ib_close > (ih + il) / 2))
         post = df[df["t_min"] > ib_end]
         feat["broke_ib_high"] = bool(post["high"].max() > ih) if len(post) else False
         feat["broke_ib_low"]  = bool(post["low"].min()  < il) if len(post) else False
@@ -93,6 +96,21 @@ def live_probabilities(facts, feat):
             out["fade_opp_break"] = float(matched[f"ib_{opp}_break"].mean())
             bf = matched["ib_break_first"].value_counts(normalize=True)
             out["fade_opp_first"] = float(bf.get(opp, 0.0))
+
+        # close-vs-midpoint confirmation of the fade
+        cam = feat.get("ib_close_above_mid")
+        if cam is not None and "ib_close_above_mid" in matched.columns and len(matched):
+            slc = matched[matched["ib_close_above_mid"] == cam]
+            # the fade is "confirmed" when the close sits beyond the midpoint, away
+            # from the first-formed extreme (low-first -> close above mid; high-first
+            # -> close below mid)
+            confirmed = (fs == "low" and cam) or (fs == "high" and not cam)
+            out["mid"] = {
+                "close_above_mid": bool(cam), "confirmed": bool(confirmed),
+                "opp": opp, "n": int(len(slc)),
+                "prob": float(slc[f"ib_{opp}_break"].mean()) if len(slc) else None,
+                "base": float(matched[f"ib_{opp}_break"].mean()),
+            }
 
     out["pd_table"] = prob_app.gap_pd_table(base)
 

@@ -814,6 +814,10 @@ def _live_render(instrument, feat, probs, open_t):
             hit = feat[key]
             badges.append(_badge(lab, "BROKEN" if hit else "intact",
                                  "#6A1B9A" if hit else "#455A64"))
+    if "ib_close_above_mid" in feat:
+        badges.append(_badge("IB close",
+                             "above mid" if feat["ib_close_above_mid"] else "below mid",
+                             "#00695C"))
     st.markdown(" ".join(badges), unsafe_allow_html=True)
 
     if "ib_first_side" not in feat:
@@ -837,6 +841,20 @@ def _live_render(instrument, feat, probs, open_t):
             st.success(f"**First-move-fade:** {fs} formed first → **{pct(probs['fade_opp_break'])} "
                        f"chance the {opp} breaks** (breaks first {pct(probs.get('fade_opp_first',0))}), "
                        f"n={probs.get('n_matched',0):,}.")
+        mid = probs.get("mid")
+        if mid and mid.get("prob") is not None:
+            where = "ABOVE" if mid["close_above_mid"] else "BELOW"
+            opp = mid["opp"].upper()
+            delta = (mid["prob"] - mid["base"]) * 100
+            if mid["confirmed"]:
+                st.success(f"**Midpoint confirmation:** IB closed **{where} its midpoint** "
+                           f"→ **{pct(mid['prob'])} chance the {opp} breaks** "
+                           f"({delta:+.1f} pp vs {pct(mid['base'])} for all matching days), "
+                           f"n={mid['n']:,}. The close confirms the fade.")
+            else:
+                st.warning(f"**Midpoint:** IB closed {where} its midpoint — this does *not* "
+                           f"confirm the fade. P({opp} breaks) on such days = "
+                           f"{pct(mid['prob'])} (n={mid['n']:,}).")
         if nlab < 30:
             st.warning(f"⚠ Only {nlab} historical matches — low confidence.")
 
