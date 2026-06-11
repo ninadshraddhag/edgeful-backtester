@@ -152,7 +152,7 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff):
     if len(idx) == 0:
         return None
     pnl, outcome = _sim_dir(ph, pl, idx[0], entry, stop, tp1, tp2, is_long, rec["close"])
-    return pnl, outcome, entry
+    return pnl, outcome, entry, abs(entry - stop)
 
 
 def dir_params(cfg, is_long):
@@ -187,11 +187,13 @@ def sim_day(rec, cfg):
         res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff)
         if res is None:
             continue
-        pnl, outcome, entry = res
+        pnl, outcome, entry, risk = res
         trades.append({
             "date": rec["date"], "dow": rec["dow"],
             "direction": "long" if is_long else "short",
             "entry": round(entry, 2), "size_pct": round(size_pct, 3),
+            "risk": round(risk, 2),
+            "r_mult": round(pnl / risk, 3) if risk > 0 else np.nan,
             "pnl": round(pnl, 2), "outcome": outcome, "win": pnl > 0,
         })
     return trades

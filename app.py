@@ -29,6 +29,7 @@ import prob_app
 import build_facts
 import live_feed
 import live_stats
+import report
 from datetime import time as dtime
 
 st.set_page_config(page_title="ORB/IB Strategy Suite", page_icon="📈", layout="wide")
@@ -561,7 +562,26 @@ def daywise_mode():
         presets["last"] = configs          # auto-persist most recent config
         _save_presets(presets)
         trades = daywise.run(prepped, configs)
-        _dw_show_results(instrument, trades)
+        with st.spinner("Building PDF report…"):
+            try:
+                pdf_bytes = report.build_daywise_pdf(
+                    instrument, (d0, d1), open_t, close_t, configs, trades)
+            except Exception as e:
+                pdf_bytes = None
+                st.warning(f"PDF generation failed: {e}")
+        st.session_state["dw_results"] = dict(
+            instrument=instrument, trades=trades, pdf=pdf_bytes, period=(d0, d1))
+
+    res = st.session_state.get("dw_results")
+    if res is not None:
+        _dw_show_results(res["instrument"], res["trades"])
+        if res.get("pdf"):
+            st.download_button(
+                "📄 Download PDF report (system + performance + all trades)",
+                res["pdf"],
+                file_name=(f"daywise_report_{res['instrument'].replace(' ', '_')}_"
+                           f"{res['period'][0]}_{res['period'][1]}.pdf"),
+                mime="application/pdf", key="dw_pdf_dl")
 
     # ── per-weekday optimizer ─────────────────────────────────────────────────
     st.divider()
@@ -626,6 +646,16 @@ def _dw_show_results(instrument, trades):
     k[3].metric("Expectancy", f"{m['expectancy']:.2f} pts/trade")
     k[4].metric("Profit Factor", f"{m['pf']:.2f}" if np.isfinite(m["pf"]) else "∞")
     k[5].metric("Trades", f"{m['trades']:,}")
+
+    rr = (m["avg_win"] / abs(m["avg_loss"])) if m["avg_loss"] else float("inf")
+    avg_r = trades["r_mult"].mean() if "r_mult" in trades.columns else float("nan")
+    k2 = st.columns(4)
+    k2[0].metric("Avg Win", f"{m['avg_win']:.1f} pts")
+    k2[1].metric("Avg Loss", f"{m['avg_loss']:.1f} pts")
+    k2[2].metric("Avg RR (win/loss)", f"{rr:.2f}" if np.isfinite(rr) else "∞",
+                 help="Average winning trade ÷ average losing trade.")
+    k2[3].metric("Avg R / trade", f"{avg_r:+.2f}R" if np.isfinite(avg_r) else "—",
+                 help="Mean PnL per unit of initial risk (entry−stop distance).")
 
     # equity curve
     t = trades.sort_values("date")
@@ -778,12 +808,12 @@ def _live_render(instrument, feat, probs, open_t):
                 st.dataframe(et, use_container_width=True, hide_index=True)
 
     # ── today's day-wise retracement plan (from saved preset) ─────────────────
+    plan = []
     if feat.get("ib_high"):
         presets = _load_presets()
         cfg_all = presets.get("last") or daywise.DEFAULT_CONFIG
         cfg = cfg_all.get(feat["dow"], daywise.DEFAULT_CONFIG[feat["dow"]])
         H, L, Rg = feat["ib_high"], feat["ib_low"], feat["ib_range"]
-        plan = []
         for is_long, allow in [(True, cfg.get("allow_long")), (False, cfg.get("allow_short"))]:
             if not allow:
                 continue
@@ -799,6 +829,18 @@ def _live_render(instrument, feat, probs, open_t):
 
     st.caption("Probabilities are historical frequencies for matching days (10-yr) — "
                "not guarantees. Treat thin samples and rare day-types with caution.")
+
+    # ── PDF session report ────────────────────────────────────────────────────
+    try:
+        pdf_bytes = report.build_live_pdf(instrument, feat, probs, plan)
+        st.download_button(
+            "📄 Download PDF session report",
+            pdf_bytes,
+            file_name=(f"live_report_{instrument.replace(' ', '_')}_"
+                       f"{pd.Timestamp.now():%Y%m%d_%H%M}.pdf"),
+            mime="application/pdf", key="live_pdf_dl")
+    except Exception as e:
+        st.caption(f"PDF report unavailable: {e}")
 
 
 def live_mode():
