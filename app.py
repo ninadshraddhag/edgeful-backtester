@@ -83,18 +83,20 @@ def get_date_bounds(mpath, mtime):
 
 
 @st.cache_data(show_spinner=True)
-def get_facts(instrument, mpath, mtime, open_t, close_t):
+def get_facts(instrument, mpath, mtime, open_t, close_t, ib_min=60):
     """
-    Per-day facts for ANY instrument & session. Uses the prebuilt facts.csv for the
-    default indices at the default 09:15/15:15 session; otherwise computes live.
+    Per-day facts for ANY instrument, session & IB duration. Uses the prebuilt
+    facts.csv for the default indices at 09:15/15:15 with a 60-min IB; otherwise
+    computes live (cached).
     """
-    if (instrument in PATHS and open_t == DEFAULT_OPEN_T
+    if (instrument in PATHS and open_t == DEFAULT_OPEN_T and ib_min == 60
             and close_t == DEFAULT_CLOSE_T and os.path.exists(FACTS)):
         f = load_facts(os.path.getmtime(FACTS))
         sub = f[f["instrument"] == instrument].copy()
         if len(sub):
             return sub
-    facts = build_facts.build_from_minute(load_min(mpath, mtime), instrument, open_t, close_t)
+    facts = build_facts.build_from_minute(load_min(mpath, mtime), instrument,
+                                          open_t, close_t, ib_min=ib_min)
     facts["day_kind"] = np.where(facts["inside_day"], "Inside Day",
                         np.where(facts["outside_day"], "Outside Day", "Normal"))
     return facts
@@ -103,7 +105,7 @@ def get_facts(instrument, mpath, mtime, open_t, close_t):
 # ─── first-passage cache (the engine) ─────────────────────────────────────────
 
 @st.cache_data(show_spinner=True)
-def build_passage(instrument, tag, mpath, mtime, open_t, close_t):
+def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
     """
     Per-day first-passage table: for a long-on-high-break and a short-on-low-break,
     the minute each target/stop level (× range) is first reached. This resolves
@@ -111,8 +113,8 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t):
     Capped at the square-off (close_t) — nothing carries past it.
     """
     mdf = load_min(mpath, mtime)
-    meta = get_facts(instrument, mpath, mtime, open_t, close_t).set_index("date")
-    end_t = (open_t + 15 - 1) if tag == "orb" else (open_t + 60 - 1)
+    meta = get_facts(instrument, mpath, mtime, open_t, close_t, ib_min).set_index("date")
+    end_t = (open_t + 15 - 1) if tag == "orb" else (open_t + ib_min - 1)
 
     rows = []
     for day, g0 in mdf.groupby("date_only", sort=True):
@@ -316,14 +318,17 @@ def data_sidebar(key):
     open_t = get_open_t(mpath, mtime)
     sq = st.time_input("Square-off (force exit)", value=dtime(15, 15), key=f"{key}_sq")
     close_t = sq.hour * 60 + sq.minute
+    ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15, key=f"{key}_ibmin",
+                                 help="Initial Balance window length from the session open."))
     st.caption(f"Session open auto-detected **{open_t//60:02d}:{open_t%60:02d}** · "
-               f"IB = first 60 min · square-off **{sq.strftime('%H:%M')}** (no overnight carry)")
+               f"IB = first {ib_min} min · square-off **{sq.strftime('%H:%M')}** "
+               "(no overnight carry)")
 
     dmin, dmax = get_date_bounds(mpath, mtime)
     dr = st.date_input("Date range", value=(dmin, dmax),
                        min_value=dmin, max_value=dmax, key=f"{key}_dates")
     d0, d1 = (dr if isinstance(dr, (tuple, list)) and len(dr) == 2 else (dmin, dmax))
-    return choice, mpath, mtime, open_t, close_t, (d0, d1)
+    return choice, mpath, mtime, open_t, close_t, ib_min, (d0, d1)
 
 
 def _filter_prepped(prepped, d0, d1):
@@ -334,9 +339,9 @@ def _filter_prepped(prepped, d0, d1):
 # ─── day-wise IB retracement mode ─────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def prep_daywise(instrument, mpath, mtime, open_t, close_t):
+def prep_daywise(instrument, mpath, mtime, open_t, close_t, ib_min=60):
     mdf = load_min(mpath, mtime)
-    return daywise.prep_days(mdf, open_t, close_t)
+    return daywise.prep_days(mdf, open_t, close_t, ib_min)
 
 
 PRESETS_FILE = os.path.join(HERE, "analysis", "daywise_presets.json")
@@ -486,11 +491,21 @@ def daywise_mode():
                "runner to TP2 with stop at breakeven")
     _dw_init_state()
 
+    ENTRY_CONDS = {
+        "Any touch (default)": "any",
+        "Only if IB High/Low NOT yet breached (pure retracement)": "no_breach",
+        "Only AFTER breakout — High broken for longs / Low for shorts (retest)": "after_breach",
+    }
     with st.sidebar:
-        instrument, mpath, mtime, open_t, close_t, (d0, d1) = data_sidebar("dw")
+        instrument, mpath, mtime, open_t, close_t, ib_min, (d0, d1) = data_sidebar("dw")
+        ec_label = st.radio("Entry condition", list(ENTRY_CONDS.keys()), key="dw_entrycond",
+                            help="Pure retracement: the resting order is cancelled the "
+                                 "moment the reference IB boundary breaks. Retest: entries "
+                                 "only count after the boundary has broken first.")
+        entry_cond = ENTRY_CONDS[ec_label]
 
     with st.spinner(f"Indexing {instrument} minute data (first run is cached)…"):
-        prepped = prep_daywise(instrument, mpath, mtime, open_t, close_t)
+        prepped = prep_daywise(instrument, mpath, mtime, open_t, close_t, ib_min)
     prepped = _filter_prepped(prepped, d0, d1)
     if not any(prepped.values()):
         st.warning("No trading days in the selected date range.")
@@ -561,11 +576,12 @@ def daywise_mode():
         configs = _dw_read_config()
         presets["last"] = configs          # auto-persist most recent config
         _save_presets(presets)
-        trades = daywise.run(prepped, configs)
+        trades = daywise.run(prepped, configs, entry_cond)
         with st.spinner("Building PDF report…"):
             try:
                 pdf_bytes = report.build_daywise_pdf(
-                    instrument, (d0, d1), open_t, close_t, configs, trades)
+                    instrument, (d0, d1), open_t, close_t, configs, trades,
+                    ib_min=ib_min, entry_cond=entry_cond)
             except Exception as e:
                 pdf_bytes = None
                 st.warning(f"PDF generation failed: {e}")
@@ -600,7 +616,7 @@ def daywise_mode():
                 with st.spinner(f"Sweeping {opt_day} configurations…"):
                     res = daywise.optimize_weekday(
                         prepped[opt_day], opt_dirs, daywise.OPT_GRID,
-                        opt_metric, int(opt_min))
+                        opt_metric, int(opt_min), entry_cond=entry_cond)
                 if res.empty:
                     st.warning("No configs met the minimum-trades threshold.")
                 else:
@@ -625,6 +641,60 @@ def daywise_mode():
                     st.session_state[f"dw_{od}_allow_short"] = bdir == "short"
                 st.session_state[f"dw_{od}_trade"] = True
                 del st.session_state["dw_opt_result"]
+                st.rerun()
+
+    # ── combined optimizer (all weekdays at once) ─────────────────────────────
+    with st.expander("🧩 Combined optimizer — best config for EVERY weekday at once"):
+        oc2 = st.columns(3)
+        co_metric = oc2[0].selectbox("Rank by",
+                                     ["expectancy", "win_rate", "net", "pf"],
+                                     key="dw_co_metric")
+        co_min = oc2[1].number_input("Min trades / weekday", 20, 1000, 100, 10,
+                                     key="dw_co_min")
+        co_dirs = oc2[2].multiselect("Directions", ["long", "short"],
+                                     default=["long", "short"], key="dw_co_dirs")
+        if st.button("🔎 Optimize all 5 weekdays (~1 min)", key="dw_co_run"):
+            if not co_dirs:
+                st.warning("Pick at least one direction.")
+            else:
+                prog = st.progress(0.0, text="Optimizing weekdays…")
+                rows = []
+                for i, day in enumerate(daywise.WEEKDAYS):
+                    res = daywise.optimize_weekday(
+                        prepped[day], co_dirs, daywise.OPT_GRID,
+                        co_metric, int(co_min), entry_cond=entry_cond)
+                    if not res.empty:
+                        b = res.iloc[0]
+                        rows.append({"Day": day, "direction": b["direction"],
+                                     "entry": int(b["entry"]), "stop": int(b["stop"]),
+                                     "tp1": int(b["tp1"]), "tp2": int(b["tp2"]),
+                                     "trades": int(b["trades"]), "win %": b["win %"],
+                                     "expectancy": b["expectancy"],
+                                     "net": b["net"], "pf": b["pf"]})
+                    prog.progress((i + 1) / len(daywise.WEEKDAYS),
+                                  text=f"{day} done ({i + 1}/{len(daywise.WEEKDAYS)})")
+                prog.empty()
+                st.session_state["dw_co_result"] = pd.DataFrame(rows)
+
+        co = st.session_state.get("dw_co_result")
+        if co is not None and len(co):
+            st.markdown("**Best configuration per weekday**")
+            st.dataframe(co, use_container_width=True, hide_index=True)
+            tot = int(co["trades"].sum())
+            wwin = float((co["win %"] * co["trades"]).sum() / tot) if tot else 0.0
+            st.caption(f"Combined: {tot:,} trades · weighted win rate {wwin:.1f}% · "
+                       f"total net {co['net'].sum():,.0f} pts. In-sample optimum — "
+                       "validate on a date sub-range before trusting it.")
+            if st.button("✅ Apply ALL best configs to the panels above", key="dw_co_apply"):
+                for _, r in co.iterrows():
+                    day = r["Day"]
+                    for x in ("entry", "stop", "tp1", "tp2"):
+                        st.session_state[f"dw_{day}_{x}"] = int(r[x])
+                    st.session_state[f"dw_{day}_allow_long"] = r["direction"] == "long"
+                    st.session_state[f"dw_{day}_allow_short"] = r["direction"] == "short"
+                    st.session_state[f"dw_{day}_separate"] = False
+                    st.session_state[f"dw_{day}_trade"] = True
+                st.session_state.pop("dw_co_result", None)
                 st.rerun()
 
 
@@ -747,8 +817,9 @@ def _live_render(instrument, feat, probs, open_t):
     st.markdown(" ".join(badges), unsafe_allow_html=True)
 
     if "ib_first_side" not in feat:
-        st.info("IB (first 60 min) still forming — full probabilities unlock at "
-                f"{(open_t+60)//60:02d}:{(open_t+60)%60:02d}. Showing gap-only stats below.")
+        ibm = feat.get("ib_min", 60)
+        st.info(f"IB (first {ibm} min) still forming — full probabilities unlock at "
+                f"{(open_t+ibm)//60:02d}:{(open_t+ibm)%60:02d}. Showing gap-only stats below.")
 
     # ── live probability cards ────────────────────────────────────────────────
     st.markdown("##### Live probabilities — historical odds for this exact day type")
@@ -849,6 +920,8 @@ def live_mode():
                "from the 10-year history.")
     cfg = _load_live_cfg()
 
+    LOOKBACKS = {"6 months": 6, "1 year": 12, "2 years": 24,
+                 "3 years": 36, "5 years": 60, "All history": None}
     with st.sidebar:
         st.header("Live data")
         source_kind = st.radio("Source", ["Demo replay", "Dhan (live)"], key="live_src")
@@ -856,6 +929,13 @@ def live_mode():
         mpath = PATHS[instrument]
         mtime = os.path.getmtime(mpath)
         open_t = get_open_t(mpath, mtime)
+        ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15,
+                                     key="live_ibmin"))
+        lb_label = st.selectbox("Probability lookback", list(LOOKBACKS.keys()),
+                                index=2, key="live_lookback",
+                                help="Only days within this window feed the live "
+                                     "probabilities — recent regimes are usually more "
+                                     "relevant than the full 10 years.")
 
         if source_kind == "Dhan (live)":
             cid = st.text_input("Dhan client_id", value=cfg["dhan"].get("client_id", ""),
@@ -879,9 +959,18 @@ def live_mode():
             st.caption(f"Replaying up to {asof_t//60:02d}:{asof_t%60:02d}")
             auto = False
 
-    # facts for this instrument
-    fn = load_facts(os.path.getmtime(FACTS))
-    fn = fn[fn["instrument"] == instrument].copy()
+    # facts for this instrument & IB duration (recomputed live when IB != 60)
+    fn = get_facts(instrument, mpath, mtime, open_t, 15 * 60 + 15, ib_min).copy()
+
+    # lookback window — anchor to the replay date in Demo mode, today otherwise
+    months = LOOKBACKS[lb_label]
+    ref_date = pd.Timestamp(asof_date) if asof_date else pd.Timestamp.today()
+    if months is not None:
+        fn = fn[fn["date"] >= ref_date - pd.DateOffset(months=months)]
+    if asof_date:                                   # no lookahead into the replay day
+        fn = fn[fn["date"].dt.date != asof_date]
+    st.sidebar.caption(f"Probability sample: {len(fn):,} days "
+                       f"({lb_label.lower()}, IB {ib_min} min)")
 
     # build the data source
     if source_kind == "Dhan (live)":
@@ -915,7 +1004,8 @@ def live_mode():
         if nt is None:
             ist = pd.Timestamp.now(tz="Asia/Kolkata")
             nt = min(ist.hour * 60 + ist.minute, 15 * 60 + 15)
-        feat = live_stats.classify_live(today, prev, open_t, 15 * 60 + 15, now_t=nt)
+        feat = live_stats.classify_live(today, prev, open_t, 15 * 60 + 15,
+                                        now_t=nt, ib_min=ib_min)
         probs = live_stats.live_probabilities(fn, feat)
         _live_render(instrument, feat, probs, open_t)
 
@@ -955,13 +1045,13 @@ def main():
                "permutation optimizer to find the best configuration")
 
     with st.sidebar:
-        instrument, mpath, mtime, open_t, close_t, (d0, d1) = data_sidebar("edge")
-        setup = st.radio("Setup", ["IB (60 min)", "ORB (15 min)"])
+        instrument, mpath, mtime, open_t, close_t, ib_min, (d0, d1) = data_sidebar("edge")
+        setup = st.radio("Setup", [f"IB ({ib_min} min)", "ORB (15 min)"])
         tag = "ib" if setup.startswith("IB") else "orb"
         st.markdown(EDGE_NOTE)
 
     with st.spinner(f"Indexing {instrument} {setup} (first run is cached)…"):
-        P = build_passage(instrument, tag, mpath, mtime, open_t, close_t)
+        P = build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min)
 
     P = P[(P["date"] >= pd.Timestamp(d0)) & (P["date"] <= pd.Timestamp(d1))].reset_index(drop=True)
     if P.empty:

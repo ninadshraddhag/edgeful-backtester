@@ -47,13 +47,16 @@ DEFAULT_CONFIG = {
 }
 
 
-def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE_T) -> dict:
+def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE_T,
+              ib_min=60) -> dict:
     """
     Group minute data into per-day records keyed by weekday.
     Each record: H, L, Rg, day_open, close, ph/pl/pt (post-IB arrays), date, dow.
     open_t  : session open (IB starts here).  close_t : square-off (no carry past this).
+    ib_min  : Initial-Balance window length in minutes.
     """
-    ib_end = open_t + 60 - 1
+    ib_end = open_t + ib_min - 1
+    min_bars = min(20, max(5, int(ib_min * 0.66)))
     out = {d: [] for d in WEEKDAYS}
     for day, g0 in min_df.groupby("date_only", sort=True):
         dow = pd.Timestamp(day).day_name()
@@ -63,7 +66,7 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
         sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
         win  = sess[sess["t_min"] <= ib_end]
         post = sess[sess["t_min"] > ib_end]
-        if len(win) < 20 or post.empty:
+        if len(win) < min_bars or post.empty:
             continue
         H, L = win["high"].max(), win["low"].min()
         Rg = H - L
@@ -128,8 +131,18 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
     return realized, ("tp1+eod" if tp1_hit else "eod")
 
 
-def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff):
-    """One directional trade on one day. Returns (pnl, outcome, entry_price) or None."""
+def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
+              entry_cond="any"):
+    """
+    One directional trade on one day. Returns (pnl, outcome, entry, risk) or None.
+    entry_cond:
+      "any"          — fill whenever the entry level trades (default)
+      "no_breach"    — only BEFORE the reference IB boundary breaks (pure retracement;
+                       the resting order is cancelled once IB High breaks for longs /
+                       IB Low for shorts)
+      "after_breach" — only AFTER the boundary breaks (breakout-retest: longs need the
+                       IB High broken first, shorts the IB Low)
+    """
     if stop_pct <= entry_pct:                              # stop must be deeper than entry
         return None
     H, L, Rg = rec["H"], rec["L"], rec["Rg"]
@@ -148,6 +161,17 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff):
     mask = (pl <= entry) & (entry <= ph)                   # candle trades through entry level
     if cutoff is not None:
         mask &= (pt <= cutoff)
+    if entry_cond != "any":
+        breach = (ph > H) if is_long else (pl < L)         # reference boundary break
+        b_idx = int(np.argmax(breach)) if breach.any() else None
+        order = np.arange(len(ph))
+        if entry_cond == "no_breach":
+            if b_idx is not None:
+                mask &= (order < b_idx)                    # cancel order once breached
+        else:                                              # after_breach (breakout-retest)
+            if b_idx is None:
+                return None
+            mask &= (order >= b_idx)
     idx = np.where(mask)[0]
     if len(idx) == 0:
         return None
@@ -169,7 +193,7 @@ def dir_params(cfg, is_long):
     return cfg["entry"], cfg["stop"], cfg["tp1"], cfg["tp2"]
 
 
-def sim_day(rec, cfg):
+def sim_day(rec, cfg, entry_cond="any"):
     """All trades for one day under its weekday config (0, 1 or 2 directional trades)."""
     if not cfg.get("trade", True):
         return []
@@ -184,7 +208,7 @@ def sim_day(rec, cfg):
         if (not is_long) and not cfg["allow_short"]:
             continue
         e, s, t1, t2 = dir_params(cfg, is_long)
-        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff)
+        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond)
         if res is None:
             continue
         pnl, outcome, entry, risk = res
@@ -199,7 +223,7 @@ def sim_day(rec, cfg):
     return trades
 
 
-def run(prepped: dict, configs: dict) -> pd.DataFrame:
+def run(prepped: dict, configs: dict, entry_cond="any") -> pd.DataFrame:
     """Run the full day-wise strategy across all weekdays. Returns trades DataFrame."""
     rows = []
     for dow, day_list in prepped.items():
@@ -207,7 +231,7 @@ def run(prepped: dict, configs: dict) -> pd.DataFrame:
         if not cfg:
             continue
         for rec in day_list:
-            rows.extend(sim_day(rec, cfg))
+            rows.extend(sim_day(rec, cfg, entry_cond))
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
@@ -239,7 +263,8 @@ def _metric(arr, name):
     return arr.mean()
 
 
-def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None):
+def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None,
+                     entry_cond="any"):
     """
     Sweep entry/stop/tp1/tp2 × direction for one weekday's days.
     `directions` is a subset of {"long","short"}. Returns a ranked DataFrame.
@@ -257,7 +282,8 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
                         is_long = d == "long"
                         pnls = []
                         for rec in day_list:
-                            res = trade_pnl(rec, entry, stop, tp1, tp2, is_long, cutoff)
+                            res = trade_pnl(rec, entry, stop, tp1, tp2, is_long,
+                                            cutoff, entry_cond)
                             if res is not None:
                                 pnls.append(res[0])
                         if len(pnls) < min_trades:

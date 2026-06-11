@@ -183,15 +183,30 @@ DISCLAIMER = ("This report is generated from historical simulation/statistics fo
 #  DAY-WISE BACKTEST REPORT
 # ────────────────────────────────────────────────────────────────────────────────
 
-def _system_definition(pdf, open_t, close_t, configs):
-    ib_end = _tmin(open_t + 60)
+ENTRY_COND_TEXT = {
+    "any": "ENTRY CONDITION - Entries are taken whenever the entry level trades, with no "
+           "precondition on the IB boundary having broken or held.",
+    "no_breach": "ENTRY CONDITION FILTER (pure retracement) - An entry is only valid while "
+                 "the reference IB boundary is still intact: the resting long order is "
+                 "cancelled the moment price trades above the IB High (shorts: below the "
+                 "IB Low). This takes retracement entries WITHOUT breakout confirmation.",
+    "after_breach": "ENTRY CONDITION FILTER (breakout-retest) - An entry is only valid "
+                    "AFTER the reference boundary has been breached: longs require the IB "
+                    "High to have broken first, shorts the IB Low. Price breaks out, then "
+                    "the pullback to the entry level is bought (sold).",
+}
+
+
+def _system_definition(pdf, open_t, close_t, configs, ib_min=60, entry_cond="any"):
+    ib_end = _tmin(open_t + ib_min)
     _h2(pdf, "1. The Trading System - Entry & Exit Criteria")
     _para(pdf,
           "INSTRUMENT SETUP - The Initial Balance (IB) is the price range formed in the "
-          f"first 60 minutes of the session ({_tmin(open_t)} to {ib_end}). IB High / IB Low "
-          "are the highest high and lowest low of that hour; IB Range = IB High - IB Low. "
-          "All entry, stop and target levels below are expressed as a percentage of this "
-          "IB Range. Each weekday has its own independent parameter set (table below).")
+          f"first {ib_min} minutes of the session ({_tmin(open_t)} to {ib_end}). IB High / "
+          "IB Low are the highest high and lowest low of that window; IB Range = IB High - "
+          "IB Low. All entry, stop and target levels below are expressed as a percentage "
+          "of this IB Range. Each weekday has its own independent parameter set (table "
+          "below).")
     _para(pdf,
           "ENTRY (Long) - After the IB completes, a limit order is placed at "
           "IB High - (Entry% x IB Range). An Entry% of 0 means entering exactly at the IB "
@@ -214,11 +229,14 @@ def _system_definition(pdf, open_t, close_t, configs):
           "No position is ever carried overnight. Conservative tie rule: if the stop and a "
           "target are both touched within the same 1-minute candle, the stop is assumed "
           "to have been hit first.")
+    _para(pdf, ENTRY_COND_TEXT.get(entry_cond, ENTRY_COND_TEXT["any"]))
     _para(pdf,
           "FILTERS - Per weekday: trading on/off, long/short direction toggles, an IB-size "
           "filter (IB Range as % of price must lie between Min and Max), and an optional "
           "latest-entry cutoff time. PnL convention: points per 1 unit; a full winner books "
-          "0.5 x (TP1 - entry) + 0.5 x (TP2 - entry). R-multiple = PnL / initial risk.")
+          "0.5 x (TP1 - entry) + 0.5 x (TP2 - entry). R-multiple = PnL / initial risk. "
+          "All trades are strictly INTRADAY - everything is squared off at "
+          f"{_tmin(close_t)}; no positions or signals carry to the next session.")
 
     rows = []
     for day in daywise.WEEKDAYS:
@@ -239,19 +257,20 @@ def _system_definition(pdf, open_t, close_t, configs):
     _table(pdf, pd.DataFrame(rows), [22, 12, 56, 56, 26, 18], font=8)
 
 
-def build_daywise_pdf(instrument, period, open_t, close_t, configs, trades):
+def build_daywise_pdf(instrument, period, open_t, close_t, configs, trades,
+                      ib_min=60, entry_cond="any"):
     pdf = _new_pdf(f"Day-wise IB Retracement - {instrument}")
     _h1(pdf, "Day-wise IB Retracement - Backtest Report")
     _kv_grid(pdf, [
         ("Instrument", instrument),
         ("Period", f"{period[0]} to {period[1]}"),
         ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
-        ("Session", f"{_tmin(open_t)} - {_tmin(close_t)} (square-off)"),
-        ("IB window", f"{_tmin(open_t)} - {_tmin(open_t + 59)}"),
+        ("Session", f"{_tmin(open_t)} - {_tmin(close_t)} (square-off, intraday only)"),
+        ("IB window", f"{_tmin(open_t)} - {_tmin(open_t + ib_min - 1)} ({ib_min} min)"),
         ("Engine", "1-min candles, scale-out 50/50"),
     ])
 
-    _system_definition(pdf, open_t, close_t, configs)
+    _system_definition(pdf, open_t, close_t, configs, ib_min, entry_cond)
 
     if trades is None or len(trades) == 0:
         _h2(pdf, "2. Results")
@@ -375,7 +394,8 @@ def build_live_pdf(instrument, feat, probs, plan_rows):
 
     _h2(pdf, "1. The Framework - How to Read This Report")
     _para(pdf,
-          "INITIAL BALANCE (IB) - the price range of the first 60 minutes of the session. "
+          f"INITIAL BALANCE (IB) - the price range of the first {feat.get('ib_min', 60)} "
+          "minutes of the session. "
           "OPENING RANGE (ORB) - the first 15 minutes. The IB High/Low act as the day's "
           "reference levels: statistically, whichever IB extreme forms FIRST tends to be "
           "faded - the opposite side breaks far more often (the 'first-move-fade' edge). "

@@ -14,13 +14,14 @@ ORB_MIN, IB_MIN = 15, 60
 EXT_LEVELS = [0.25, 0.5, 1.0, 1.5, 2.0]
 
 
-def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None):
+def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None,
+                  ib_min=IB_MIN, orb_min=ORB_MIN):
     """Features known so far from today's session (capped at now_t)."""
     prev_high, prev_low, prev_close = prev_hlc if prev_hlc else (None, None, None)
     df = today_df if "t_min" in today_df.columns else build_facts.clean_min(today_df)
     df = df[(df["t_min"] >= open_t) & (df["t_min"] <= close_t)].sort_values("t_min")
 
-    feat = {"open_t": open_t, "close_t": close_t,
+    feat = {"open_t": open_t, "close_t": close_t, "ib_min": ib_min,
             "prev_high": prev_high, "prev_low": prev_low, "prev_close": prev_close}
     if now_t is None:
         now_t = int(df["t_min"].max()) if len(df) else open_t
@@ -30,7 +31,7 @@ def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None):
         feat["phase"] = "pre-open"
         return feat
 
-    orb_end, ib_end = open_t + ORB_MIN - 1, open_t + IB_MIN - 1
+    orb_end, ib_end = open_t + orb_min - 1, open_t + ib_min - 1
     feat["day_open"] = float(df.iloc[0]["open"])
     feat["price"]    = float(df.iloc[-1]["close"])
     feat["dow"]      = pd.Timestamp(df.iloc[0]["date"]).day_name()
@@ -54,7 +55,7 @@ def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None):
 
     # IB
     ib = df[df["t_min"] <= ib_end]
-    if now_t >= ib_end and len(ib) >= 20:
+    if now_t >= ib_end and len(ib) >= min(20, max(5, int(ib_min * 0.66))):
         ih, il = float(ib["high"].max()), float(ib["low"].min())
         rg = ih - il
         feat.update(ib_high=ih, ib_low=il, ib_range=rg,

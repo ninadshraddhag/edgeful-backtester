@@ -142,18 +142,21 @@ def detect_open_t(df):
     return int(firsts.mode().iloc[0])
 
 
-def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T):
+def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
+                      orb_min=ORB_MIN, ib_min=IB_MIN):
     """
     Build the per-day facts table from minute data for ANY instrument.
     open_t  : session-open minute (auto-detected if None) → IB/ORB windows start here.
     close_t : square-off minute (default 15:15) → nothing after this counts; no carry.
+    ib_min  : Initial-Balance window length in minutes (default 60); orb_min likewise.
     """
     if "t_min" not in df.columns:
         df = clean_min(df)
     if open_t is None:
         open_t = detect_open_t(df)
-    orb_end = open_t + ORB_MIN - 1
-    ib_end  = open_t + IB_MIN  - 1
+    orb_end = open_t + orb_min - 1
+    ib_end  = open_t + ib_min  - 1
+    min_ib_bars = min(20, max(5, int(ib_min * 0.66)))
 
     recs = []
     prev_close = prev_high = prev_low = None
@@ -167,7 +170,7 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T):
         g = sess
         orb = g[g["t_min"] <= orb_end]
         ib  = g[g["t_min"] <= ib_end]
-        if len(orb) < 5 or len(ib) < 20:
+        if len(orb) < 5 or len(ib) < min_ib_bars:
             prev_close, prev_high, prev_low = g.iloc[-1]["close"], g["high"].max(), g["low"].min()
             prev_inside = False
             continue
@@ -214,6 +217,7 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T):
             hi, lo = win["high"].max(), win["low"].min()
             rng = hi - lo
             first_side = _first_extreme_side(win, hi, lo)
+            win_close = win.iloc[-1]["close"]               # close of the window's last candle
             post = g[g["t_min"] > end_t]
             hb, lb, bfirst = _breach(post, hi, lo)
             up_ext, dn_ext, up_retr, dn_retr = _excursion(post, hi, lo, rng)
@@ -221,6 +225,8 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T):
 
             rec.update({
                 f"{tag}_high": hi, f"{tag}_low": lo, f"{tag}_range": round(rng, 2),
+                f"{tag}_close": win_close,
+                f"{tag}_close_above_mid": bool(win_close > (hi + lo) / 2),
                 f"{tag}_first_side": first_side,
                 f"{tag}_high_break": hb, f"{tag}_low_break": lb,
                 f"{tag}_both_break": hb and lb,

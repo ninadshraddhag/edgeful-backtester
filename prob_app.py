@@ -42,6 +42,22 @@ def load_facts(mtime):           # mtime arg busts the cache when facts.csv chan
     return df
 
 
+@st.cache_data(show_spinner=True)
+def load_facts_custom(ib_min, _mtimes):
+    """Recompute the facts table live for a non-default IB duration (cached)."""
+    import build_facts
+    frames = []
+    for name, path in build_facts.FILES.items():
+        if os.path.exists(path):
+            mdf = build_facts.clean_min(pd.read_csv(path))
+            frames.append(build_facts.build_from_minute(
+                mdf, name, None, build_facts.DEFAULT_CLOSE_T, ib_min=ib_min))
+    df = pd.concat(frames, ignore_index=True)
+    df["day_kind"] = np.where(df["inside_day"], "Inside Day",
+                     np.where(df["outside_day"], "Outside Day", "Normal"))
+    return df
+
+
 def build_facts_inline():
     import build_facts
     frames = [build_facts.build_instrument(n, p)
@@ -81,7 +97,7 @@ def parse_query(q: str) -> dict:
     if "orb" in q or "opening range" in q:
         upd["f_setup"] = "ORB (15 min)"
     elif "ib" in q or "initial balance" in q or "hour" in q:
-        upd["f_setup"] = "IB (60 min)"
+        upd["f_setup"] = "IB"
     return upd
 
 
@@ -139,7 +155,16 @@ def render():
             st.rerun()
         st.stop()
 
-    df = load_facts(os.path.getmtime(FACTS))
+    # IB duration (widget lives in the sidebar below; read its state here so the
+    # right facts table is loaded before anything renders)
+    ib_min = int(st.session_state.get("f_ibmin", 60))
+    if ib_min == 60:
+        df = load_facts(os.path.getmtime(FACTS))
+    else:
+        import build_facts as _bf
+        mtimes = tuple(os.path.getmtime(p) for p in _bf.FILES.values() if os.path.exists(p))
+        with st.spinner(f"Computing facts for a {ib_min}-min IB (first time only)…"):
+            df = load_facts_custom(ib_min, mtimes)
 
     # ── natural-language box ──────────────────────────────────────────────────
     with st.form("nlq"):
@@ -155,7 +180,8 @@ def render():
 
     # ── defaults ──────────────────────────────────────────────────────────────
     st.session_state.setdefault("f_instrument", "NIFTY 50")
-    st.session_state.setdefault("f_setup", "IB (60 min)")
+    st.session_state.setdefault("f_setup", "IB")
+    st.session_state.setdefault("f_ibmin", 60)
     st.session_state.setdefault("f_dow", DOW_ORDER.copy())
     st.session_state.setdefault("f_gap", GAP_ORDER.copy())
     st.session_state.setdefault("f_kind", KIND_ORDER.copy())
@@ -165,7 +191,11 @@ def render():
     with st.sidebar:
         st.header("Filters  =  your question")
         st.radio("Instrument", ["NIFTY 50", "BANK NIFTY"], key="f_instrument")
-        st.radio("Setup", ["IB (60 min)", "ORB (15 min)"], key="f_setup")
+        st.radio("Setup", ["IB", "ORB (15 min)"], key="f_setup")
+        st.select_slider("IB duration (min)", options=[30, 45, 60, 90, 120],
+                         key="f_ibmin",
+                         help="Length of the Initial Balance window from the open. "
+                              "Non-60 values recompute the stats live (cached).")
         tag  = "ib" if st.session_state["f_setup"].startswith("IB") else "orb"
         inst = st.session_state["f_instrument"]
 
@@ -187,7 +217,7 @@ def render():
         s_lo = float(np.floor(base_inst[size_col].min()))
         s_hi = float(np.ceil(base_inst[size_col].quantile(0.995)))
         size_rng = st.slider(f"{tag.upper()} size (points)", s_lo, s_hi, (s_lo, s_hi),
-                             key=f"f_size_{tag}_{inst}")
+                             key=f"f_size_{tag}_{inst}_{ib_min}")
         st.caption("Filter days by how wide the opening range was.")
 
         st.divider()
@@ -221,7 +251,8 @@ def render():
     sub = sub[(sub[size_col] >= size_rng[0]) & (sub[size_col] <= size_rng[1])]
 
     # ── headline sentence ─────────────────────────────────────────────────────
-    bits = [inst, st.session_state["f_setup"]]
+    setup_label = f"IB ({ib_min} min)" if tag == "ib" else "ORB (15 min)"
+    bits = [inst, setup_label]
     if isinstance(date_sel, (tuple, list)) and len(date_sel) == 2:
         bits.append(f"{date_sel[0]}→{date_sel[1]}")
     if len(st.session_state["f_dow"]) < 5:  bits.append("/".join(st.session_state["f_dow"]))
@@ -274,6 +305,35 @@ def render():
         else:
             st.info("No 'low first' days in this slice.")
 
+    # ── close vs midpoint (momentum confirmation) ─────────────────────────────
+    st.markdown(f"#### {tag.upper()} close vs midpoint — confirmation of the fade")
+    mid_col = f"{tag}_close_above_mid"
+    if mid_col in sub.columns:
+        a = lf[lf[mid_col] == True]            # low first AND window closed above mid
+        b = hf[hf[mid_col] == False]           # high first AND window closed below mid
+        mp = st.columns(2)
+        with mp[0]:
+            if len(a):
+                base_a = pct(lf[f"{tag}_high_break"].mean()) if len(lf) else "—"
+                mp[0].metric(f"LOW first + close ABOVE mid → HIGH breaks  (n={len(a):,})",
+                             pct(a[f"{tag}_high_break"].mean()),
+                             f"vs {base_a} for all low-first days")
+            else:
+                st.info("No days: low first + close above mid.")
+        with mp[1]:
+            if len(b):
+                base_b = pct(hf[f"{tag}_low_break"].mean()) if len(hf) else "—"
+                mp[1].metric(f"HIGH first + close BELOW mid → LOW breaks  (n={len(b):,})",
+                             pct(b[f"{tag}_low_break"].mean()),
+                             f"vs {base_b} for all high-first days")
+            else:
+                st.info("No days: high first + close below mid.")
+        st.caption(f"Close = last 1-min close of the {tag.upper()} window; midpoint = "
+                   "(window high + low) / 2. Closing back beyond the midpoint confirms "
+                   "the first move has already been faded.")
+    else:
+        st.info("Rebuild the facts table (`python build_facts.py`) to enable this stat.")
+
     # ── EXTENSIONS & RETRACEMENTS ─────────────────────────────────────────────
     st.divider()
     st.markdown(f"#### Extensions & Retracements  ·  measured in × {tag.upper()} range")
@@ -318,7 +378,9 @@ def render():
     # ── PREVIOUS-DAY LEVELS (PDH / PDL) ───────────────────────────────────────
     st.divider()
     st.markdown("#### Previous-Day High / Low  (PDH / PDL)")
-    st.caption("Day-level stats — respond to date & day-of-week filters (independent of the ORB/IB setup).")
+    st.caption("Same-day INTRADAY touches only — measured within today's session up to the "
+               "15:15 square-off (PDH/PDL = previous session's high/low). Nothing carries to "
+               "the next day. Responds to date & day-of-week filters.")
 
     pc = st.columns(3)
     # inside-day breakout: yesterday was an inside day
