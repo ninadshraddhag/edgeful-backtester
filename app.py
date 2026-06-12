@@ -425,13 +425,45 @@ def _confl_label(c):
             f"kind:{c['kind'] or 'any'} · first:{c['first'] or 'any'}")
 
 
+CONFL_FILE = os.path.join(HERE, "analysis", "confluence_presets.json")
+
+
+def _confl_store_load():
+    if os.path.exists(CONFL_FILE):
+        try:
+            return json.load(open(CONFL_FILE, encoding="utf-8"))
+        except Exception:
+            pass
+    return {"presets": {}, "last": []}
+
+
+def _confl_store_save(data):
+    os.makedirs(os.path.dirname(CONFL_FILE), exist_ok=True)
+    json.dump(data, open(CONFL_FILE, "w", encoding="utf-8"), indent=2)
+
+
+def _confl_components():
+    """Session component list; on first access restore the last-used set from disk."""
+    if "edge_confl" not in st.session_state:
+        st.session_state["edge_confl"] = _confl_store_load().get("last") or []
+    return st.session_state["edge_confl"]
+
+
+def _confl_persist_last():
+    store = _confl_store_load()
+    store["last"] = st.session_state.get("edge_confl", [])
+    _confl_store_save(store)
+
+
 def _confl_add(specs):
-    comps = st.session_state.setdefault("edge_confl", [])
+    comps = _confl_components()
     added = 0
     for s_ in specs:
         if s_ not in comps:
             comps.append(s_)
             added += 1
+    if added:
+        _confl_persist_last()
     return added
 
 
@@ -439,11 +471,42 @@ def confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t):
     st.markdown("Combine several edge configurations into ONE portfolio — "
                 "uncorrelated strategies smooth the equity curve. Add components "
                 "from the **Single Strategy** tab or tick rows in the **Optimizer**.")
-    comps = st.session_state.setdefault("edge_confl", [])
+    comps = _confl_components()
+
+    # ── save / load named confluences ─────────────────────────────────────────
+    store = _confl_store_load()
+    with st.expander("💾 Save / Load confluences", expanded=False):
+        s_ = st.columns([2, 1, 2, 1, 1])
+        pname = s_[0].text_input("Confluence name", key="confl_pname",
+                                 placeholder="e.g. confluence-1")
+        if s_[1].button("Save", key="confl_psave", use_container_width=True):
+            if not comps:
+                st.warning("Nothing to save — add strategies first.")
+            elif pname.strip():
+                store["presets"][pname.strip()] = comps
+                store["last"] = comps
+                _confl_store_save(store)
+                st.success(f"Saved confluence '{pname.strip()}' ({len(comps)} strategies).")
+            else:
+                st.warning("Enter a name first.")
+        names = list(store.get("presets", {}).keys())
+        sel = s_[2].selectbox("Saved confluences", ["—"] + names, key="confl_psel")
+        if s_[3].button("Load", key="confl_pload", use_container_width=True) and sel != "—":
+            st.session_state["edge_confl"] = list(store["presets"][sel])
+            _confl_persist_last()
+            st.rerun()
+        if s_[4].button("Delete", key="confl_pdel", use_container_width=True) and sel != "—":
+            store["presets"].pop(sel, None)
+            _confl_store_save(store)
+            st.rerun()
+        st.caption("Saved to `analysis/confluence_presets.json` — the last list "
+                   "auto-restores on launch. Note: on the cloud app, saves last until "
+                   "the app restarts; save locally for permanence.")
+
     if not comps:
         st.info("No strategies added yet. Use “➕ Add this strategy to Confluence” on the "
-                "Single Strategy tab, or tick optimizer rows and click "
-                "“➕ Add ticked to Confluence”.")
+                "Single Strategy tab, tick optimizer rows and click “➕ Add ticked to "
+                "Confluence”, or load a saved confluence above.")
         return
 
     cur = [c for c in comps if c["instrument"] == instrument and c["tag"] == tag]
@@ -457,9 +520,11 @@ def confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t):
     rm = cdel[0].multiselect("Remove #", list(range(1, len(comps) + 1)), key="confl_rm")
     if cdel[1].button("Remove selected", use_container_width=True) and rm:
         st.session_state["edge_confl"] = [c for i, c in enumerate(comps, 1) if i not in rm]
+        _confl_persist_last()
         st.rerun()
     if cdel[2].button("Clear all", use_container_width=True):
         st.session_state["edge_confl"] = []
+        _confl_persist_last()
         st.rerun()
     if other:
         st.caption(f"⚠ {other} component(s) belong to a different instrument/setup and are "
