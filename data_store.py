@@ -101,19 +101,35 @@ def session_open(name: str, auto_open_t: int) -> int:
     return int(ov) if ov else int(auto_open_t)
 
 
-def set_open_override(name: str, open_t: int | None, auto_open_t: int | None = None):
-    """
-    Persist a session-open override (e.g. NQ → 570 = 09:30 EST). Passing the
-    auto-detected value (or None) clears the override instead of storing it.
-    """
+def session_close(name: str, default_close_t: int) -> int:
+    """The instrument's square-off minute: stored override, else the default
+    (15:15 NSE). E.g. NQ/XAUUSD → 960 = 16:00 ET cash close."""
+    ov = _load_meta().get(name, {}).get("close_t")
+    return int(ov) if ov else int(default_close_t)
+
+
+def _set_override(name: str, field: str, value, default=None):
     meta = _load_meta()
     entry = meta.get(name, {})
-    if open_t is None or (auto_open_t is not None and int(open_t) == int(auto_open_t)):
-        entry.pop("open_t", None)
+    if value is None or (default is not None and int(value) == int(default)):
+        entry.pop(field, None)
     else:
-        entry["open_t"] = int(open_t)
+        entry[field] = int(value)
     if entry:
         meta[name] = entry
     else:
         meta.pop(name, None)
     _save_meta(meta)
+
+
+def set_open_override(name: str, open_t: int | None, auto_open_t: int | None = None):
+    """
+    Persist a session-open override (e.g. NQ → 570 = 09:30 EST). Passing the
+    auto-detected value (or None) clears the override instead of storing it.
+    """
+    _set_override(name, "open_t", open_t, auto_open_t)
+
+
+def set_close_override(name: str, close_t: int | None, default_close_t: int | None = None):
+    """Persist a square-off override (e.g. NQ → 960 = 16:00 ET)."""
+    _set_override(name, "close_t", close_t, default_close_t)

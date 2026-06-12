@@ -247,14 +247,15 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
     return pd.DataFrame(recs)
 
 
-def build_instrument(name, path, open_t=None, close_t=DEFAULT_CLOSE_T):
+def build_instrument(name, path, open_t=None, close_t=None):
     print(f"\n[{name}] reading {path} ...")
     df = clean_min(data_store.read_minute(path))
-    # session open: explicit arg > stored override (e.g. NQ 09:30 EST) > auto
+    # session times: explicit arg > stored override (e.g. NQ 09:30/16:00 ET) > default
     ot = open_t if open_t is not None else data_store.session_open(name, detect_open_t(df))
+    ct = close_t if close_t is not None else data_store.session_close(name, DEFAULT_CLOSE_T)
     print(f"   {len(df):,} candles over {df['date_only'].nunique():,} days; "
-          f"open={ot} close={close_t}")
-    out = build_from_minute(df, name, ot, close_t)
+          f"open={ot} close={ct}")
+    out = build_from_minute(df, name, ot, ct)
     print(f"   built {len(out):,} usable day-records")
     return out
 

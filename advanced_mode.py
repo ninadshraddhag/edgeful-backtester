@@ -124,18 +124,26 @@ def _data_sidebar():
     mtime = os.path.getmtime(mpath)
     dmin, dmax, auto_t = _bounds(mpath, mtime)
 
-    # session open with persistent per-instrument override (NQ → 09:30 EST)
+    # session open/close with persistent per-instrument overrides (NQ → 09:30
+    # / 16:00 ET). Widget keys scoped per instrument to avoid cross-market leaks.
     cur_t = data_store.session_open(instrument, auto_t)
     so = st.time_input("Session open", value=dtime(cur_t // 60, cur_t % 60),
-                       key="adv_so",
+                       key=f"adv_so_{instrument}",
                        help="Auto-detected; override for 24h instruments "
                             "(e.g. NQ → 09:30 EST). Remembered per instrument.")
     open_t = so.hour * 60 + so.minute
     if open_t != cur_t:
         data_store.set_open_override(instrument, open_t, auto_t)
 
-    sq = st.time_input("Square-off (force exit)", value=dtime(15, 15), key="adv_sq")
+    default_close = 15 * 60 + 15
+    cur_c = data_store.session_close(instrument, default_close)
+    sq = st.time_input("Square-off (force exit)",
+                       value=dtime(cur_c // 60, cur_c % 60),
+                       key=f"adv_sq_{instrument}",
+                       help="Remembered per instrument (NSE 15:15 · NQ/XAUUSD 16:00 ET).")
     close_t = sq.hour * 60 + sq.minute
+    if close_t != cur_c:
+        data_store.set_close_override(instrument, close_t, default_close)
     dr = st.date_input("Date range", value=(dmin, dmax),
                        min_value=dmin, max_value=dmax, key="adv_dates")
     d0, d1 = (dr if isinstance(dr, (tuple, list)) and len(dr) == 2 else (dmin, dmax))

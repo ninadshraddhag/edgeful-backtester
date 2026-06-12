@@ -90,8 +90,9 @@ def get_facts(instrument, mpath, mtime, open_t, close_t, ib_min=60):
     computes live (cached).
     """
     std_open = data_store.session_open(instrument, get_open_t(mpath, mtime))
+    std_close = data_store.session_close(instrument, DEFAULT_CLOSE_T)
     if (instrument in PATHS and open_t == std_open and ib_min == 60
-            and close_t == DEFAULT_CLOSE_T and os.path.exists(FACTS)):
+            and close_t == std_close and os.path.exists(FACTS)):
         f = load_facts(os.path.getmtime(FACTS))
         sub = f[f["instrument"] == instrument].copy()
         if len(sub):
@@ -319,11 +320,13 @@ def data_sidebar(key):
 
     # session open: auto-detect, with a persistent per-instrument override —
     # needed for 24h instruments (e.g. NQ: auto-detect sees the Globex open,
-    # set 09:30 EST here for the cash-session IB).
+    # set 09:30 EST here for the cash-session IB). Widget keys are scoped per
+    # instrument so switching instruments can't leak times across markets.
+    wkey = f"{key}_{choice}"
     auto_t = get_open_t(mpath, mtime)
     cur_t = data_store.session_open(choice, auto_t)
     so = st.time_input("Session open (IB starts here)",
-                       value=dtime(cur_t // 60, cur_t % 60), key=f"{key}_so",
+                       value=dtime(cur_t // 60, cur_t % 60), key=f"{wkey}_so",
                        help="Auto-detected from the data. Override for 24-hour "
                             "instruments: e.g. NQ → 09:30 (EST cash open). The "
                             "override is remembered per instrument.")
@@ -331,8 +334,13 @@ def data_sidebar(key):
     if open_t != cur_t:
         data_store.set_open_override(choice, open_t, auto_t)
 
-    sq = st.time_input("Square-off (force exit)", value=dtime(15, 15), key=f"{key}_sq")
+    cur_c = data_store.session_close(choice, DEFAULT_CLOSE_T)
+    sq = st.time_input("Square-off (force exit)",
+                       value=dtime(cur_c // 60, cur_c % 60), key=f"{wkey}_sq",
+                       help="Remembered per instrument (NSE 15:15 · NQ/XAUUSD 16:00 ET).")
     close_t = sq.hour * 60 + sq.minute
+    if close_t != cur_c:
+        data_store.set_close_override(choice, close_t, DEFAULT_CLOSE_T)
     ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15, key=f"{key}_ibmin",
                                  help="Initial Balance window length from the session open."))
     st.caption(f"Session open **{open_t//60:02d}:{open_t%60:02d}**"
