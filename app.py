@@ -989,11 +989,12 @@ def daywise_mode():
                 pdf_bytes = None
                 st.warning(f"PDF generation failed: {e}")
         st.session_state["dw_results"] = dict(
-            instrument=instrument, trades=trades, pdf=pdf_bytes, period=(d0, d1))
+            instrument=instrument, trades=trades, pdf=pdf_bytes, period=(d0, d1),
+            mpath=mpath, mtime=mtime, open_t=open_t, close_t=close_t, ib_min=ib_min)
 
     res = st.session_state.get("dw_results")
     if res is not None:
-        _dw_show_results(res["instrument"], res["trades"])
+        _dw_show_results(res)
         if res.get("pdf"):
             st.download_button(
                 "📄 Download PDF report (system + performance + all trades)",
@@ -1107,7 +1108,80 @@ def daywise_mode():
                 st.rerun()
 
 
-def _dw_show_results(instrument, trades):
+def _dw_day_chart(day_df, tr, open_t, ib_min):
+    """One day-wise trade on its day's minute chart: IB box, entry/stop/TP1/TP2
+    levels and entry/exit markers."""
+    day = pd.Timestamp(tr["date"])
+    x = day_df["date"]
+    fig = go.Figure()
+    fig.add_candlestick(x=x, open=day_df["open"], high=day_df["high"],
+                        low=day_df["low"], close=day_df["close"], name="Price",
+                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
+    # IB box
+    fig.add_shape(type="rect",
+                  x0=day + pd.Timedelta(minutes=open_t),
+                  x1=day + pd.Timedelta(minutes=open_t + ib_min - 1),
+                  y0=tr["ib_low"], y1=tr["ib_high"],
+                  fillcolor="rgba(96,125,139,0.15)", line=dict(width=1, color="#607D8B"))
+    x_entry = day + pd.Timedelta(minutes=int(tr["entry_t"]))
+    x_exit = day + pd.Timedelta(minutes=int(tr["exit_t"]))
+    # levels drawn over the trade's lifetime
+    for px, color, dash in [(tr["stop_px"], "#C62828", "dash"),
+                            (tr["tp1_px"], "#66BB6A", "dash"),
+                            (tr["tp2_px"], "#2E7D32", "dash"),
+                            (tr["entry"], "#607D8B", "dot")]:
+        fig.add_shape(type="line", x0=x_entry, x1=x_exit, y0=px, y1=px,
+                      line=dict(width=1.4, color=color, dash=dash))
+    long = tr["direction"] == "long"
+    win_c = "#2E7D32" if tr["win"] else "#C62828"
+    fig.add_scatter(x=[x_entry], y=[tr["entry"]], mode="markers+text",
+                    marker=dict(symbol="triangle-up" if long else "triangle-down",
+                                size=14, color="#2E7D32" if long else "#C62828",
+                                line=dict(width=1, color="white")),
+                    text=[f"ENTRY {hhmm(tr['entry_t'])}"],
+                    textposition="bottom center" if long else "top center",
+                    textfont=dict(size=10), showlegend=False)
+    fig.add_scatter(x=[x_exit], y=[tr["exit_px"]], mode="markers+text",
+                    marker=dict(symbol="x", size=11, color=win_c),
+                    text=[f"EXIT {hhmm(tr['exit_t'])} ({tr['outcome']})"],
+                    textposition="top center", textfont=dict(size=10), showlegend=False)
+    fig.add_scatter(x=[x_entry, x_exit], y=[tr["entry"], tr["exit_px"]], mode="lines",
+                    line=dict(width=1.2, color=win_c, dash="dot"),
+                    showlegend=False, hoverinfo="skip")
+    fig.update_layout(height=480, template="plotly_white",
+                      xaxis_rangeslider_visible=False, margin=dict(t=30, b=10),
+                      title=f"{day:%a %d %b %Y} · {tr['direction'].upper()} · "
+                            f"{tr['pnl']:+.1f} pts ({tr['r_mult']:+.2f}R)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _dw_trade_browser(res):
+    trades = res["trades"]
+    if "entry_t" not in trades.columns:
+        st.info("Re-run the backtest to enable the visual browser (older results "
+                "lack trade times).")
+        return
+    t_ = trades.reset_index(drop=True)
+    labels = [f"#{i+1} · {r['date']:%d %b %Y} {hhmm(r['entry_t'])} · "
+              f"{r['direction'].upper()} · {r['outcome']} · {r['pnl']:+.1f} pts"
+              for i, r in t_.iterrows()]
+    sel = st.selectbox("Trade", range(len(t_)), format_func=lambda i: labels[i],
+                       key="dw_tb")
+    tr = t_.iloc[sel]
+    mdf = load_min(res["mpath"], res["mtime"])
+    dd = mdf[(mdf["date_only"] == pd.Timestamp(tr["date"]).date())
+             & (mdf["t_min"] >= res["open_t"]) & (mdf["t_min"] <= res["close_t"])]
+    if dd.empty:
+        st.info("No minute data for this trade's day.")
+        return
+    _dw_day_chart(dd, tr, res["open_t"], res["ib_min"])
+    st.caption("Shaded box = IB window · grey dotted = entry level · red dashed = stop · "
+               "light green = TP1 (half exits, stop → breakeven) · dark green = TP2 · "
+               "▲/▼ entry · ✕ final exit.")
+
+
+def _dw_show_results(res):
+    instrument, trades = res["instrument"], res["trades"]
     st.divider()
     if trades.empty:
         st.warning("No trades generated. Check that days are enabled, a direction is "
@@ -1166,11 +1240,19 @@ def _dw_show_results(instrument, trades):
         st.plotly_chart(figp, use_container_width=True)
 
     with st.expander(f"Trade log ({len(trades):,})"):
-        st.dataframe(trades.sort_values("date", ascending=False),
+        show = trades.copy()
+        if "entry_t" in show.columns:
+            show.insert(3, "entry time", show["entry_t"].map(hhmm))
+            show.insert(4, "exit time", show["exit_t"].map(hhmm))
+            show = show.drop(columns=["entry_t", "exit_t", "ib_high", "ib_low"],
+                             errors="ignore")
+        st.dataframe(show.sort_values("date", ascending=False),
                      use_container_width=True, hide_index=True)
     st.download_button("⬇ Download trades (CSV)", trades.to_csv(index=False).encode(),
                        file_name=f"daywise_{instrument.replace(' ', '_')}.csv",
                        mime="text/csv")
+    with st.expander("🔍 Trade browser — any trade on its day's candlestick chart"):
+        _dw_trade_browser(res)
 
 
 # ─── live market statistics mode ──────────────────────────────────────────────

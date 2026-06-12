@@ -106,7 +106,10 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
 
 
 def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
-    """Scale-out simulation from entry bar `start`. Returns (pnl_points, outcome)."""
+    """
+    Scale-out simulation from entry bar `start`.
+    Returns (pnl_points, outcome, exit_bar_index, final_exit_price).
+    """
     realized = 0.0
     tp1_hit = False
     cur_stop = stop
@@ -125,14 +128,14 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
                 tp2_reach = lo_b <= tp2
             if stop_hit:                                   # conservative: stop before tp
                 realized += (cur_stop - entry) if is_long else (entry - cur_stop)
-                return realized, "stop"
+                return realized, "stop", i, cur_stop
             if tp1_reach:
                 realized += 0.5 * ((tp1 - entry) if is_long else (entry - tp1))
                 tp1_hit = True
                 cur_stop = entry                           # move to breakeven
                 if tp2_reach:                              # both targets same bar
                     realized += 0.5 * ((tp2 - entry) if is_long else (entry - tp2))
-                    return realized, "tp1+tp2"
+                    return realized, "tp1+tp2", i, tp2
         else:
             if is_long:
                 be_hit    = lo_b <= cur_stop
@@ -141,15 +144,15 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
                 be_hit    = hi_b >= cur_stop
                 tp2_reach = lo_b <= tp2
             if be_hit:
-                return realized, "tp1+be"                  # runner stopped at breakeven
+                return realized, "tp1+be", i, cur_stop     # runner stopped at breakeven
             if tp2_reach:
                 realized += 0.5 * ((tp2 - entry) if is_long else (entry - tp2))
-                return realized, "tp1+tp2"
+                return realized, "tp1+tp2", i, tp2
         i += 1
     # End-of-day: exit whatever remains at the close
     rem = 0.5 if tp1_hit else 1.0
     realized += rem * ((close - entry) if is_long else (entry - close))
-    return realized, ("tp1+eod" if tp1_hit else "eod")
+    return realized, ("tp1+eod" if tp1_hit else "eod"), n - 1, close
 
 
 def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
@@ -196,8 +199,12 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
     idx = np.where(mask)[0]
     if len(idx) == 0:
         return None
-    pnl, outcome = _sim_dir(ph, pl, idx[0], entry, stop, tp1, tp2, is_long, rec["close"])
-    return pnl, outcome, entry, abs(entry - stop)
+    pnl, outcome, exit_i, exit_px = _sim_dir(ph, pl, idx[0], entry, stop, tp1, tp2,
+                                             is_long, rec["close"])
+    extras = dict(entry_t=float(pt[idx[0]]), exit_t=float(pt[exit_i]),
+                  exit_px=float(exit_px), stop_px=float(stop),
+                  tp1_px=float(tp1), tp2_px=float(tp2))
+    return pnl, outcome, entry, abs(entry - stop), extras
 
 
 def dir_params(cfg, is_long):
@@ -279,7 +286,7 @@ def sim_day(rec, cfg, entry_cond="any", dir_filters=None):
         res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond)
         if res is None:
             continue
-        pnl, outcome, entry, risk = res
+        pnl, outcome, entry, risk, ext = res
         trades.append({
             "date": rec["date"], "dow": rec["dow"],
             "direction": "long" if is_long else "short",
@@ -287,6 +294,12 @@ def sim_day(rec, cfg, entry_cond="any", dir_filters=None):
             "risk": round(risk, 2),
             "r_mult": round(pnl / risk, 3) if risk > 0 else np.nan,
             "pnl": round(pnl, 2), "outcome": outcome, "win": pnl > 0,
+            # for the visual trade browser
+            "entry_t": ext["entry_t"], "exit_t": ext["exit_t"],
+            "exit_px": round(ext["exit_px"], 2),
+            "stop_px": round(ext["stop_px"], 2),
+            "tp1_px": round(ext["tp1_px"], 2), "tp2_px": round(ext["tp2_px"], 2),
+            "ib_high": rec["H"], "ib_low": rec["L"],
         })
     return trades
 
