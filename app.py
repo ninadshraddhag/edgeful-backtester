@@ -813,21 +813,33 @@ def daywise_mode():
         entry_cond = ENTRY_CONDS[ec_label]
 
         st.markdown("**🎯 IB directional filters** *(optional)*")
+        fc_min = int(st.select_slider(
+            "First-candle window (min)", options=[5, 10, 15, 30, 45, 60, 90, 120],
+            value=15, key="dw_flt_fcmin",
+            help="Window for the green/red first-candle filters below: candle = "
+                 "session open → close at this many minutes in."))
         dir_filters = {
+            "candle_min": fc_min,
             "long_first_low": st.checkbox(
                 "LONG only if IB LOW formed first", key="dw_flt_ll",
                 help="Low forms first, high later → bullish bias; otherwise skip longs."),
             "long_close_above": st.checkbox(
                 "LONG only if IB closes ABOVE midpoint", key="dw_flt_lc",
                 help="IB's last candle closes above (IB High+Low)/2 → bullish confirmation."),
+            "long_first_green": st.checkbox(
+                f"LONG only if first {fc_min}-min candle is GREEN", key="dw_flt_lg",
+                help="Close at the end of the window above the session open → bullish bias."),
             "short_first_high": st.checkbox(
                 "SHORT only if IB HIGH formed first", key="dw_flt_sh",
                 help="High forms first, low later → bearish bias; otherwise skip shorts."),
             "short_close_below": st.checkbox(
                 "SHORT only if IB closes BELOW midpoint", key="dw_flt_sc",
                 help="IB's last candle closes below the midpoint → bearish confirmation."),
+            "short_first_red": st.checkbox(
+                f"SHORT only if first {fc_min}-min candle is RED", key="dw_flt_sr",
+                help="Close at the end of the window below the session open → bearish bias."),
         }
-        if any(dir_filters.values()):
+        if any(v for k, v in dir_filters.items() if k != "candle_min"):
             st.caption("Filters apply to the backtest AND both optimizers.")
 
     with st.spinner(f"Indexing {instrument} minute data (first run is cached)…"):

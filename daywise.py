@@ -85,6 +85,10 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
             first_side = "low" if c0["close"] >= c0["open"] else "high"
         ib_close = float(win.iloc[-1]["close"])
 
+        # first 120 session minutes (t_min + close arrays) — lets the optional
+        # "first N-min candle green/red" filter use ANY window at runtime
+        f0 = sess[sess["t_min"] <= sess["t_min"].iloc[0] + 119]
+
         out[dow].append({
             "date": pd.Timestamp(day), "dow": dow,
             "H": float(H), "L": float(L), "Rg": float(Rg),
@@ -92,6 +96,8 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
             "close": float(sess.iloc[-1]["close"]),     # close AT the square-off
             "first_side": first_side,
             "close_above_mid": ib_close > (H + L) / 2,
+            "ft": f0["t_min"].values.astype(float),
+            "fc": f0["close"].values.astype(float),
             "ph": post["high"].values.astype(float),
             "pl": post["low"].values.astype(float),
             "pt": post["t_min"].values.astype(float),
@@ -208,25 +214,47 @@ def dir_params(cfg, is_long):
     return cfg["entry"], cfg["stop"], cfg["tp1"], cfg["tp2"]
 
 
+def first_candle_dir(rec, n_min):
+    """
+    Direction of the session's first n-minute candle:
+    close at minute n vs the session open.  +1 green · -1 red · 0 doji/unknown.
+    """
+    ft, fc = rec.get("ft"), rec.get("fc")
+    if ft is None or fc is None or len(ft) == 0:
+        return 0
+    mask = ft <= ft[0] + n_min - 1
+    if not mask.any():
+        return 0
+    diff = fc[mask][-1] - rec["day_open"]
+    return 1 if diff > 0 else (-1 if diff < 0 else 0)
+
+
 def dir_allowed(rec, is_long, dir_filters):
     """
     Optional IB directional filters (all default off):
       long_first_low    — LONG only if the IB LOW formed first (high later)
       long_close_above  — LONG only if the IB closed above its midpoint
+      long_first_green  — LONG only if the first `candle_min`-min candle is GREEN
       short_first_high  — SHORT only if the IB HIGH formed first (low later)
       short_close_below — SHORT only if the IB closed below its midpoint
+      short_first_red   — SHORT only if the first `candle_min`-min candle is RED
     """
     if not dir_filters:
         return True
+    n_min = int(dir_filters.get("candle_min", 15))
     if is_long:
         if dir_filters.get("long_first_low") and rec.get("first_side") != "low":
             return False
         if dir_filters.get("long_close_above") and not rec.get("close_above_mid", True):
             return False
+        if dir_filters.get("long_first_green") and first_candle_dir(rec, n_min) != 1:
+            return False
     else:
         if dir_filters.get("short_first_high") and rec.get("first_side") != "high":
             return False
         if dir_filters.get("short_close_below") and rec.get("close_above_mid", False):
+            return False
+        if dir_filters.get("short_first_red") and first_candle_dir(rec, n_min) != -1:
             return False
     return True
 
