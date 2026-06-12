@@ -1,0 +1,11 @@
+# Edgeful theme — clean, light, fintech. Charts use plotly_white to match.
+[theme]
+base = "light"
+primaryColor = "#1565C0"
+backgroundColor = "#FAFBFD"
+secondaryBackgroundColor = "#EEF2F7"
+textColor = "#15233B"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

@@ -606,6 +606,81 @@ def confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t):
 
 # ─── UI helpers ───────────────────────────────────────────────────────────────
 
+APP_CSS = """
+<style>
+/* ——— typography ——— */
+h1 { letter-spacing: -0.02em; font-weight: 800; }
+h2, h3 { letter-spacing: -0.01em; }
+
+/* ——— metric cards ——— */
+[data-testid="stMetric"] {
+  background: linear-gradient(180deg, #ffffff 0%, #f6f9fc 100%);
+  border: 1px solid #e3e9f2;
+  border-radius: 14px;
+  padding: 14px 16px 10px 16px;
+  box-shadow: 0 1px 3px rgba(16, 42, 67, 0.06);
+}
+[data-testid="stMetricLabel"] { color: #5b6b7f; }
+[data-testid="stMetricValue"] { font-weight: 700; letter-spacing: -0.01em; }
+
+/* ——— tabs ——— */
+.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+.stTabs [data-baseweb="tab"] {
+  background: #eef2f7;
+  border-radius: 10px 10px 0 0;
+  padding: 8px 16px;
+  font-weight: 600;
+}
+.stTabs [aria-selected="true"] {
+  background: #ffffff;
+  border-bottom: 3px solid #1565C0;
+}
+
+/* ——— expanders, dataframes, containers ——— */
+[data-testid="stExpander"] {
+  border: 1px solid #e3e9f2;
+  border-radius: 12px;
+  background: #ffffff;
+}
+[data-testid="stDataFrame"] { border: 1px solid #e3e9f2; border-radius: 12px; }
+[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 12px; }
+
+/* ——— buttons ——— */
+.stButton button, .stDownloadButton button { border-radius: 10px; font-weight: 600; }
+.stButton button[kind="primary"] {
+  background: linear-gradient(90deg, #1565C0 0%, #1E88E5 100%);
+  border: none;
+  box-shadow: 0 2px 10px rgba(21, 101, 192, 0.35);
+}
+.stButton button[kind="primary"]:hover { box-shadow: 0 4px 14px rgba(21, 101, 192, 0.5); }
+
+/* ——— sidebar ——— */
+[data-testid="stSidebar"] {
+  border-right: 1px solid #e3e9f2;
+  background: linear-gradient(180deg, #f7f9fc 0%, #eef2f7 100%);
+}
+</style>
+"""
+
+BRAND_HTML = """
+<div style="padding:4px 0 10px 0">
+  <span style="font-size:1.55rem;font-weight:800;letter-spacing:-0.02em;
+        background:linear-gradient(90deg,#1565C0,#26A69A);
+        -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
+    ⚡ EDGEFUL</span><br>
+  <span style="color:#7b8aa0;font-size:0.78rem;letter-spacing:0.06em;
+        text-transform:uppercase;">Quant Backtesting Suite</span>
+</div>
+"""
+
+
+def inject_style():
+    """Global look & feel — called once per run, themes every mode."""
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    with st.sidebar:
+        st.markdown(BRAND_HTML, unsafe_allow_html=True)
+
+
 def pct(x): return f"{x*100:.1f}%"
 
 EDGE_NOTE = """
@@ -1600,6 +1675,7 @@ def live_mode():
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    inject_style()
     if not os.path.exists(FACTS):
         # first boot (e.g. fresh clone / Streamlit Cloud): build the facts
         # table from whatever instruments are available, instead of erroring.

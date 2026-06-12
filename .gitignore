@@ -3,7 +3,7 @@ __pycache__/
 analysis/facts.csv
 analysis/facts.parquet
 analysis/_uploaded_*.csv
-.streamlit/
+.streamlit/secrets.toml
 logs/
 analysis/daywise_presets.json
 live_config.json

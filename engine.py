@@ -127,6 +127,12 @@ def build_features(df1m: pd.DataFrame, open_t: int, params: dict) -> pd.DataFram
     X["pdl"] = X["date_only"].map(levels["pdl"])
     X["prev_close"] = X["date_only"].map(levels["prev_close"])
 
+    # session VWAP — computed on 1-min bars, sampled at each exec bar's close
+    # time (the bar's last constituent minute), so it carries no lookahead
+    vwap_1m = ind.session_vwap(df1m)
+    vwap_ser = pd.Series(vwap_1m.to_numpy(), index=df1m["date"].to_numpy())
+    X["vwap"] = X["close_time"].map(vwap_ser)
+
     cpr = ind.central_pivot_range(df1m, params.get("cpr_period", "Daily"),
                                   params.get("cpr_narrow", 0.30),
                                   params.get("cpr_wide", 0.75))
@@ -252,6 +258,14 @@ def evaluate_condition(X: pd.DataFrame, cond: dict, side: str = "long") -> np.nd
         if not long:
             name, op = LEVEL_MIRROR[name], OP_MIRROR[op]
         return _price_vs(X, X[LEVEL_COLS[name]], op, side)
+
+    if t == "price_vwap":
+        if "vwap" not in X:
+            return np.zeros(n, dtype=bool)
+        op = cond.get("op", "above")
+        if not long:
+            op = OP_MIRROR[op]
+        return _price_vs(X, X["vwap"], op, side)
 
     if t == "rsi":
         p = int(cond.get("period", 14))

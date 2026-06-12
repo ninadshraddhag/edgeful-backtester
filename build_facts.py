@@ -130,6 +130,8 @@ def clean_min(df):
     df["date"] = pd.to_datetime(df["date"])
     for c in ("open", "high", "low", "close"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "volume" in df.columns:                 # kept for VWAP (optional column)
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
     df = df.dropna(subset=["open", "high", "low", "close"])
     df = df[(df["high"] >= df["low"]) & (df["open"] > 0)]
     df = df.sort_values("date").reset_index(drop=True)

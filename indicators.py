@@ -192,6 +192,31 @@ def central_pivot_range(df: pd.DataFrame, period: str = "Daily",
     return out
 
 
+# ─── session VWAP ─────────────────────────────────────────────────────────────
+
+def session_vwap(df: pd.DataFrame) -> pd.Series:
+    """
+    Session-anchored VWAP on a cleaned 1-min frame: cumulative Σ(typical×vol) /
+    Σ(vol), reset every trading day. Typical price = (H+L+C)/3.
+
+    Volume handling: uses the `volume` column when the day actually has volume;
+    days with zero/absent volume (e.g. NIFTY index data) fall back to equal
+    weights — i.e. the running average of typical price (TWAP), the standard
+    proxy for instruments without traded volume.
+    """
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    if "volume" in df.columns:
+        v = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+        day_total = v.groupby(df["date_only"]).transform("sum")
+        w = pd.Series(np.where(day_total.to_numpy() > 0, v.to_numpy(), 1.0),
+                      index=df.index)
+    else:
+        w = pd.Series(1.0, index=df.index)
+    num = (tp * w).groupby(df["date_only"]).cumsum()
+    den = w.groupby(df["date_only"]).cumsum()
+    return num / den
+
+
 # ─── key levels: PDH / PDL ────────────────────────────────────────────────────
 
 def key_levels(df: pd.DataFrame) -> pd.DataFrame:

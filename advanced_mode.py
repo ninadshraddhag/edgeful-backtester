@@ -43,6 +43,7 @@ HTF_TFS  = ["5-min", "15-min", "30-min", "1-hour", "Daily", "Weekly"]
 SUBJECTS = {
     "price_ema":     "Price vs EMA",
     "price_htf_ema": "Price vs HTF EMA",
+    "price_vwap":    "Price vs VWAP (session)",
     "price_level":   "Price vs key level (PDH/PDL/CPR)",
     "rsi":           "RSI",
     "cpr_width":     "CPR width type",
@@ -55,6 +56,7 @@ SUBJECTS = {
 EXIT_SUBJECTS = {
     "price_ema":     "Price vs EMA",
     "price_htf_ema": "Price vs HTF EMA",
+    "price_vwap":    "Price vs VWAP (session)",
     "price_level":   "Price vs key level (PDH/PDL/CPR)",
     "rsi":           "RSI",
     "time_after":    "Time reached (exit at/after)",
@@ -210,6 +212,14 @@ def _row(prefix, rid, subjects, dflt):
                                                     int(dflt.get("period", 20)),
                                                     key=f"{prefix}{rid}_p",
                                                     label_visibility="collapsed"))
+        elif subj == "price_vwap":
+            cc = box.columns([1.4, 1.6])
+            cond["op"] = cc[0].selectbox("op", engine.OPS_EMA, key=f"{prefix}{rid}_vop",
+                                         index=engine.OPS_EMA.index(dflt.get("op", "above")),
+                                         label_visibility="collapsed")
+            cc[1].caption("Session VWAP (volume-weighted; TWAP fallback for "
+                          "no-volume instruments). As an EXIT: 'below' closes longs "
+                          "on a close below VWAP — shorts mirror to 'above'.")
         elif subj == "price_level":
             cc = box.columns([1.4, 1])
             cond["op"] = cc[0].selectbox("op", engine.OPS_LEVEL, key=f"{prefix}{rid}_op2",
@@ -301,6 +311,8 @@ def _describe(cond):
         return f"price {cond['op']} EMA {cond['period']}"
     if t == "price_htf_ema":
         return f"price {cond['op']} HTF EMA {cond['period']}"
+    if t == "price_vwap":
+        return f"price {cond['op']} VWAP"
     if t == "price_level":
         return f"price {cond['op']} {cond['level']}"
     if t == "rsi":
@@ -440,6 +452,9 @@ def _trade_chart(V, tr, ema_cols):
         if col in V and V[col].notna().any():
             fig.add_scatter(x=x, y=V[col], mode="lines", name=col.replace("ema_", "EMA "),
                             line=dict(width=1.3, color=palette[i % len(palette)]))
+    if "vwap" in V and V["vwap"].notna().any():
+        fig.add_scatter(x=x, y=V["vwap"], mode="lines", name="VWAP",
+                        line=dict(width=1.6, color="#FFB300"))
     for col, nm, color in [("pdh", "PDH", "#455A64"), ("pdl", "PDL", "#455A64"),
                            ("cpr_top", "CPR top", "#7E57C2"),
                            ("cpr_bottom", "CPR bot", "#7E57C2")]:
@@ -503,7 +518,8 @@ def _trade_browser(X, trades, ema_cols):
     c[5].metric("P&L", f"₹{tr['pnl']:,.0f}")
     _trade_chart(V, tr, ema_cols)
     st.caption("▲/▼ entry · ✕ exit · red dashed = initial stop · green dashed = target · "
-               "shaded = FVG zones · dashed h-lines = PDH/PDL & CPR.")
+               "amber line = session VWAP · shaded = FVG zones · dashed h-lines = "
+               "PDH/PDL & CPR.")
 
 
 def _window_chart(X, trades, ema_cols, d0, d1):
@@ -530,6 +546,9 @@ def _window_chart(X, trades, ema_cols, d0, d1):
         if col in V:
             fig.add_scatter(x=x, y=V[col], mode="lines", name=col.replace("ema_", "EMA "),
                             line=dict(width=1.2, color=palette[i % len(palette)]))
+    if "vwap" in V and V["vwap"].notna().any():
+        fig.add_scatter(x=x, y=V["vwap"], mode="lines", name="VWAP",
+                        line=dict(width=1.5, color="#FFB300"), connectgaps=False)
     for col, nm in [("pdh", "PDH"), ("pdl", "PDL"),
                     ("cpr_top", "CPR top"), ("cpr_bottom", "CPR bot")]:
         if V[col].notna().any():
@@ -743,7 +762,7 @@ def render(*_):
         with st.spinner("Simulating…"):
             trades, eq = engine.backtest(Xw, strategy, close_t=close_t)
         ema_cols = [f"ema_{p}" for p in params["ema_periods"]]
-        keep = (["open_time", "date_only", "open", "high", "low", "close",
+        keep = (["open_time", "date_only", "open", "high", "low", "close", "vwap",
                  "bull_fvg", "bear_fvg", "fvg_gap_bottom", "fvg_gap_top",
                  "cpr_top", "cpr_bottom", "pdh", "pdl", "t_min", "dow",
                  "gap_type", "prev_day_kind"] + ema_cols)
