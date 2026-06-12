@@ -28,10 +28,12 @@ import os
 import numpy as np
 import pandas as pd
 
-FILES = {
-    "NIFTY 50":   r"C:\NIFTY 50_minute.csv",
-    "BANK NIFTY": r"C:\NIFTY BANK_minute.csv",
-}
+import data_store
+
+# Backward-compat alias — the live registry is data_store.discover(), which
+# merges these legacy local paths with everything in data/ (incl. uploaded
+# instruments such as NQ / XAUUSD).
+FILES = data_store.LEGACY
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -247,17 +249,19 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
 
 def build_instrument(name, path, open_t=None, close_t=DEFAULT_CLOSE_T):
     print(f"\n[{name}] reading {path} ...")
-    df = clean_min(pd.read_csv(path))
-    ot = open_t if open_t is not None else detect_open_t(df)
+    df = clean_min(data_store.read_minute(path))
+    # session open: explicit arg > stored override (e.g. NQ 09:30 EST) > auto
+    ot = open_t if open_t is not None else data_store.session_open(name, detect_open_t(df))
     print(f"   {len(df):,} candles over {df['date_only'].nunique():,} days; "
           f"open={ot} close={close_t}")
-    out = build_from_minute(df, name, open_t, close_t)
+    out = build_from_minute(df, name, ot, close_t)
     print(f"   built {len(out):,} usable day-records")
     return out
 
 
 def main():
-    frames = [build_instrument(n, p) for n, p in FILES.items() if os.path.exists(p)]
+    files = data_store.discover()
+    frames = [build_instrument(n, p) for n, p in files.items() if os.path.exists(p)]
     facts = pd.concat(frames, ignore_index=True)
 
     csv_path = os.path.join(OUT_DIR, "facts.csv")

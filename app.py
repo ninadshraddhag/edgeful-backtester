@@ -27,6 +27,7 @@ import plotly.graph_objects as go
 import daywise
 import prob_app
 import build_facts
+import data_store
 import live_feed
 import live_stats
 import report
@@ -36,10 +37,9 @@ st.set_page_config(page_title="ORB/IB Strategy Suite", page_icon="📈", layout=
 
 HERE  = os.path.dirname(os.path.abspath(__file__))
 FACTS = os.path.join(HERE, "analysis", "facts.csv")
-PATHS = {
-    "NIFTY 50":   r"C:\NIFTY 50_minute.csv",
-    "BANK NIFTY": r"C:\NIFTY BANK_minute.csv",
-}
+# Dynamic instrument registry: legacy C:\ files + repo data/ folder + uploads
+# (NQ, XAUUSD, …). Re-evaluated every script run, so new uploads appear at once.
+PATHS = data_store.discover()
 
 DEFAULT_OPEN_T  = 9 * 60 + 15    # 09:15 (NSE); auto-detected per instrument
 DEFAULT_CLOSE_T = 15 * 60 + 15   # 15:15 square-off — no positions/levels carry overnight
@@ -59,7 +59,7 @@ SIDE_LOGICS = {
 
 @st.cache_data(show_spinner=False)
 def load_min(path, mtime):
-    return build_facts.clean_min(pd.read_csv(path))
+    return build_facts.clean_min(data_store.read_minute(path))
 
 
 @st.cache_data(show_spinner=False)
@@ -89,7 +89,8 @@ def get_facts(instrument, mpath, mtime, open_t, close_t, ib_min=60):
     facts.csv for the default indices at 09:15/15:15 with a 60-min IB; otherwise
     computes live (cached).
     """
-    if (instrument in PATHS and open_t == DEFAULT_OPEN_T and ib_min == 60
+    std_open = data_store.session_open(instrument, get_open_t(mpath, mtime))
+    if (instrument in PATHS and open_t == std_open and ib_min == 60
             and close_t == DEFAULT_CLOSE_T and os.path.exists(FACTS)):
         f = load_facts(os.path.getmtime(FACTS))
         sub = f[f["instrument"] == instrument].copy()
@@ -285,42 +286,57 @@ def resolve_path(instrument, uploaded):
 
 def data_sidebar(key):
     """
-    Shared sidebar block: instrument picker (incl. uploads like XAUUSD / NQ),
-    auto-detected session open, square-off time and date range.
-    Returns (instrument, mpath, mtime, open_t, close_t, (d0, d1)).
+    Shared sidebar block: instrument picker (incl. persistent uploads like
+    XAUUSD / NQ), session open (auto-detected, overridable for EST markets),
+    square-off time and date range.
+    Returns (instrument, mpath, mtime, open_t, close_t, ib_min, (d0, d1)).
     """
-    st.session_state.setdefault("custom_instruments", {})
     st.header("Data")
-    names = list(PATHS.keys()) + list(st.session_state["custom_instruments"].keys())
+    paths = data_store.discover()
+    names = list(paths.keys())
     choice = st.selectbox("Instrument", names + ["➕ Upload new instrument…"],
                           key=f"{key}_inst")
 
     if choice == "➕ Upload new instrument…":
         nm = st.text_input("Instrument name (e.g. XAUUSD, NQ)", key=f"{key}_nm")
-        f  = st.file_uploader("Minute CSV — columns: date, open, high, low, close",
+        f  = st.file_uploader("Minute CSV — columns: date, open, high, low, close. "
+                              "Timestamps in EXCHANGE-LOCAL time (e.g. EST for NQ).",
                               type="csv", key=f"{key}_nf")
         if nm and f is not None:
-            path = os.path.join(HERE, "analysis", f"_inst_{nm.replace(' ', '_')}.csv")
-            with open(path, "wb") as fh:
-                fh.write(f.getbuffer())
-            st.session_state["custom_instruments"][nm] = path
-            st.success(f"Added {nm}. Select it above.")
+            data_store.save_upload(nm.strip(), f.getbuffer())
+            st.success(f"Added {nm.strip()} — it is now available in every mode. "
+                       "Select it above.")
             st.rerun()
-        st.info("Name the instrument and upload its minute CSV to add it.")
+        st.info("Name the instrument and upload its minute CSV to add it. It is "
+                "saved to the data/ folder, so it persists and shows up in ALL modes.")
         st.stop()
 
-    mpath = PATHS.get(choice) or st.session_state["custom_instruments"].get(choice)
+    mpath = paths.get(choice)
     if not mpath or not os.path.exists(mpath):
         st.warning(f"No data file for {choice}.")
         st.stop()
     mtime = os.path.getmtime(mpath)
 
-    open_t = get_open_t(mpath, mtime)
+    # session open: auto-detect, with a persistent per-instrument override —
+    # needed for 24h instruments (e.g. NQ: auto-detect sees the Globex open,
+    # set 09:30 EST here for the cash-session IB).
+    auto_t = get_open_t(mpath, mtime)
+    cur_t = data_store.session_open(choice, auto_t)
+    so = st.time_input("Session open (IB starts here)",
+                       value=dtime(cur_t // 60, cur_t % 60), key=f"{key}_so",
+                       help="Auto-detected from the data. Override for 24-hour "
+                            "instruments: e.g. NQ → 09:30 (EST cash open). The "
+                            "override is remembered per instrument.")
+    open_t = so.hour * 60 + so.minute
+    if open_t != cur_t:
+        data_store.set_open_override(choice, open_t, auto_t)
+
     sq = st.time_input("Square-off (force exit)", value=dtime(15, 15), key=f"{key}_sq")
     close_t = sq.hour * 60 + sq.minute
     ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15, key=f"{key}_ibmin",
                                  help="Initial Balance window length from the session open."))
-    st.caption(f"Session open auto-detected **{open_t//60:02d}:{open_t%60:02d}** · "
+    st.caption(f"Session open **{open_t//60:02d}:{open_t%60:02d}**"
+               f"{' (auto)' if open_t == auto_t else ' (override)'} · "
                f"IB = first {ib_min} min · square-off **{sq.strftime('%H:%M')}** "
                "(no overnight carry)")
 
@@ -961,10 +977,11 @@ def live_mode():
     with st.sidebar:
         st.header("Live data")
         source_kind = st.radio("Source", ["Demo replay", "Kotak Neo (live)"], key="live_src")
-        instrument = st.selectbox("Instrument", list(PATHS.keys()), key="live_inst")
-        mpath = PATHS[instrument]
+        live_paths = data_store.discover()
+        instrument = st.selectbox("Instrument", list(live_paths.keys()), key="live_inst")
+        mpath = live_paths[instrument]
         mtime = os.path.getmtime(mpath)
-        open_t = get_open_t(mpath, mtime)
+        open_t = data_store.session_open(instrument, get_open_t(mpath, mtime))
         ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15,
                                      key="live_ibmin"))
         lb_label = st.selectbox("Probability lookback", list(LOOKBACKS.keys()),
@@ -1121,14 +1138,23 @@ def live_mode():
 
 def main():
     if not os.path.exists(FACTS):
+        # first boot (e.g. fresh clone / Streamlit Cloud): build the facts
+        # table from whatever instruments are available, instead of erroring.
         st.title("📈 ORB / IB Strategy Suite")
-        st.error("analysis/facts.csv missing — run `python build_facts.py` first.")
-        st.stop()
+        if not data_store.discover():
+            st.error("No instrument data found. Add a `*_minute.csv` or "
+                     "`*_minute.parquet` file to the `data/` folder (or upload "
+                     "one once the app is running with data).")
+            st.stop()
+        with st.spinner("First run — building the facts table from the minute "
+                        "data (one-time, a few minutes)…"):
+            build_facts.main()
+        st.rerun()
 
     mode = st.sidebar.radio(
         "Mode",
-        ["Edge Backtester", "Day-wise IB Retracement", "Probabilities",
-         "Live Market Statistics"],
+        ["Edge Backtester", "Day-wise IB Retracement", "Advanced Backtesting",
+         "Probabilities", "Live Market Statistics"],
         key="app_mode")
     st.sidebar.divider()
     if mode == "Probabilities":
@@ -1136,6 +1162,10 @@ def main():
         return
     if mode == "Live Market Statistics":
         live_mode()
+        return
+    if mode == "Advanced Backtesting":
+        import advanced_mode
+        advanced_mode.render()
         return
 
     st.title("📈 ORB / IB Strategy Suite")

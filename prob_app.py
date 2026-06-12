@@ -46,12 +46,14 @@ def load_facts(mtime):           # mtime arg busts the cache when facts.csv chan
 def load_facts_custom(ib_min, _mtimes):
     """Recompute the facts table live for a non-default IB duration (cached)."""
     import build_facts
+    import data_store
     frames = []
-    for name, path in build_facts.FILES.items():
+    for name, path in data_store.discover().items():
         if os.path.exists(path):
-            mdf = build_facts.clean_min(pd.read_csv(path))
+            mdf = build_facts.clean_min(data_store.read_minute(path))
+            open_t = data_store.session_open(name, build_facts.detect_open_t(mdf))
             frames.append(build_facts.build_from_minute(
-                mdf, name, None, build_facts.DEFAULT_CLOSE_T, ib_min=ib_min))
+                mdf, name, open_t, build_facts.DEFAULT_CLOSE_T, ib_min=ib_min))
     df = pd.concat(frames, ignore_index=True)
     df["day_kind"] = np.where(df["inside_day"], "Inside Day",
                      np.where(df["outside_day"], "Outside Day", "Normal"))
@@ -60,11 +62,7 @@ def load_facts_custom(ib_min, _mtimes):
 
 def build_facts_inline():
     import build_facts
-    frames = [build_facts.build_instrument(n, p)
-              for n, p in build_facts.FILES.items() if os.path.exists(p)]
-    facts = pd.concat(frames, ignore_index=True)
-    os.makedirs(os.path.join(HERE, "analysis"), exist_ok=True)
-    facts.to_csv(FACTS, index=False)
+    build_facts.main()          # builds for every discovered instrument
 
 
 # ─── natural-language → filters ───────────────────────────────────────────────
@@ -161,8 +159,9 @@ def render():
     if ib_min == 60:
         df = load_facts(os.path.getmtime(FACTS))
     else:
-        import build_facts as _bf
-        mtimes = tuple(os.path.getmtime(p) for p in _bf.FILES.values() if os.path.exists(p))
+        import data_store as _ds
+        mtimes = tuple(os.path.getmtime(p) for p in _ds.discover().values()
+                       if os.path.exists(p))
         with st.spinner(f"Computing facts for a {ib_min}-min IB (first time only)…"):
             df = load_facts_custom(ib_min, mtimes)
 
