@@ -2,6 +2,6 @@ streamlit>=1.35.0
 pandas>=2.0.0
 numpy>=1.26.0
 plotly>=5.22.0
-dhanhq>=2.0.0   # optional — only needed for Live Market Statistics (Dhan source)
+neo-api-client  # optional — only needed for Live Market Statistics (Kotak Neo source)
 fpdf2>=2.8.0    # PDF reports
 matplotlib>=3.8 # charts embedded in PDF reports

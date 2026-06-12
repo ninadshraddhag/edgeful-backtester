@@ -784,10 +784,16 @@ LIVE_CFG = os.path.join(HERE, "live_config.json")
 def _load_live_cfg():
     if os.path.exists(LIVE_CFG):
         try:
-            return json.load(open(LIVE_CFG, encoding="utf-8"))
+            raw = json.load(open(LIVE_CFG, encoding="utf-8"))
+            # migrate old Dhan-only configs gracefully
+            if "kotak" not in raw:
+                raw["kotak"] = {"consumer_key": "", "consumer_secret": "",
+                                "mobile": "", "password": ""}
+            return raw
         except Exception:
             pass
-    return {"dhan": {"client_id": "", "access_token": ""}, "instruments": {}}
+    return {"kotak": {"consumer_key": "", "consumer_secret": "",
+                      "mobile": "", "password": ""}, "instruments": {}}
 
 
 def _save_live_cfg(cfg):
@@ -954,7 +960,7 @@ def live_mode():
                  "3 years": 36, "5 years": 60, "All history": None}
     with st.sidebar:
         st.header("Live data")
-        source_kind = st.radio("Source", ["Demo replay", "Dhan (live)"], key="live_src")
+        source_kind = st.radio("Source", ["Demo replay", "Kotak Neo (live)"], key="live_src")
         instrument = st.selectbox("Instrument", list(PATHS.keys()), key="live_inst")
         mpath = PATHS[instrument]
         mtime = os.path.getmtime(mpath)
@@ -967,15 +973,78 @@ def live_mode():
                                      "probabilities — recent regimes are usually more "
                                      "relevant than the full 10 years.")
 
-        if source_kind == "Dhan (live)":
-            cid = st.text_input("Dhan client_id", value=cfg["dhan"].get("client_id", ""),
-                                key="live_cid")
-            tok = st.text_input("Dhan access_token", value=cfg["dhan"].get("access_token", ""),
-                                type="password", key="live_tok")
-            if st.button("💾 Save credentials"):
-                cfg["dhan"] = {"client_id": cid.strip(), "access_token": tok.strip()}
-                _save_live_cfg(cfg)
-                st.success("Saved to live_config.json (gitignored).")
+        if source_kind == "Kotak Neo (live)":
+            auth_state = st.session_state.get("kotak_auth_state", "idle")
+
+            if auth_state == "idle":
+                st.markdown("**Kotak Neo credentials**")
+                ckey = st.text_input("Consumer Key",
+                                     value=cfg["kotak"].get("consumer_key", ""),
+                                     key="kotak_ckey")
+                csec = st.text_input("Consumer Secret",
+                                     value=cfg["kotak"].get("consumer_secret", ""),
+                                     type="password", key="kotak_csec")
+                mob = st.text_input("Registered mobile",
+                                    value=cfg["kotak"].get("mobile", ""),
+                                    key="kotak_mob",
+                                    help="The mobile number registered with your Kotak account.")
+                pwd = st.text_input("Trading password",
+                                    value=cfg["kotak"].get("password", ""),
+                                    type="password", key="kotak_pwd")
+                if st.button("💾 Save & Login (sends OTP)"):
+                    cfg["kotak"] = {"consumer_key": ckey.strip(),
+                                    "consumer_secret": csec.strip(),
+                                    "mobile": mob.strip(),
+                                    "password": pwd.strip()}
+                    _save_live_cfg(cfg)
+                    try:
+                        from neo_api_client import NeoAPI
+                        _client = NeoAPI(consumer_key=ckey.strip(),
+                                         consumer_secret=csec.strip(),
+                                         environment="prod")
+                        resp = _client.login(mobilenumber=mob.strip(),
+                                             password=pwd.strip())
+                        st.session_state["kotak_client"] = _client
+                        st.session_state["kotak_auth_state"] = "otp_sent"
+                        msg = (resp.get("message") or resp.get("data", {}).get("message", "")
+                               if isinstance(resp, dict) else str(resp))
+                        st.success(f"OTP sent. {msg}")
+                        st.rerun()
+                    except ImportError:
+                        st.error("neo-api-client not installed. "
+                                 "Run:  pip install neo-api-client")
+                    except Exception as ex:
+                        st.error(f"Login failed: {ex}")
+
+            elif auth_state == "otp_sent":
+                st.info("OTP sent to your registered mobile.")
+                otp = st.text_input("Enter OTP", key="kotak_otp", max_chars=6)
+                col_a, col_b = st.columns(2)
+                if col_a.button("✅ Verify OTP"):
+                    _client = st.session_state.get("kotak_client")
+                    if _client is None:
+                        st.error("Session lost — start over.")
+                        st.session_state.pop("kotak_auth_state", None)
+                        st.rerun()
+                    else:
+                        try:
+                            _client.session_2fa(OTP=otp.strip())
+                            st.session_state["kotak_auth_state"] = "authenticated"
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"OTP verification failed: {ex}")
+                if col_b.button("↺ Re-login"):
+                    st.session_state.pop("kotak_auth_state", None)
+                    st.session_state.pop("kotak_client", None)
+                    st.rerun()
+
+            else:  # authenticated
+                st.success("✅ Connected to Kotak Neo")
+                if st.button("🔓 Disconnect"):
+                    st.session_state.pop("kotak_client", None)
+                    st.session_state.pop("kotak_auth_state", None)
+                    st.rerun()
+
             auto = st.toggle("Auto-refresh every 60s", value=True, key="live_auto")
             asof_t = None
             asof_date = None
@@ -1003,24 +1072,27 @@ def live_mode():
                        f"({lb_label.lower()}, IB {ib_min} min)")
 
     # build the data source
-    if source_kind == "Dhan (live)":
-        if not (cfg["dhan"].get("client_id") and cfg["dhan"].get("access_token")):
-            st.warning("Enter your Dhan client_id and access_token in the sidebar, then Save. "
-                       "Get them from web.dhan.co → Profile → Access DhanHQ APIs.  "
-                       "Install the SDK with:  `pip install dhanhq`")
+    if source_kind == "Kotak Neo (live)":
+        if st.session_state.get("kotak_auth_state") != "authenticated":
+            st.info("Complete Kotak Neo authentication in the sidebar to start live data.")
+            return
+        _kotak_client = st.session_state.get("kotak_client")
+        if _kotak_client is None:
+            st.error("Authentication session lost — please reconnect in the sidebar.")
+            st.session_state.pop("kotak_auth_state", None)
             return
         try:
-            source = live_feed.DhanSource(cfg["dhan"]["client_id"], cfg["dhan"]["access_token"],
-                                          instruments=cfg.get("instruments") or None)
+            source = live_feed.KotakNeoSource(_kotak_client,
+                                              instruments=cfg.get("instruments") or None)
         except Exception as e:
-            st.error(f"Could not initialise Dhan: {e}")
+            st.error(f"Could not initialise Kotak Neo source: {e}")
             return
         now_t = None
     else:
         source = live_feed.DemoSource(load_min(mpath, mtime), asof_date, asof_t)
         now_t = asof_t
 
-    run_every = "60s" if (source_kind == "Dhan (live)" and auto) else None
+    run_every = "60s" if (source_kind == "Kotak Neo (live)" and auto) else None
 
     @st.fragment(run_every=run_every)
     def panel():
@@ -1040,7 +1112,7 @@ def live_mode():
         _live_render(instrument, feat, probs, open_t)
 
     panel()
-    if run_every is None and source_kind == "Dhan (live)":
+    if run_every is None and source_kind == "Kotak Neo (live)":
         if st.button("🔄 Refresh now"):
             st.rerun()
 

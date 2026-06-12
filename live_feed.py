@@ -5,9 +5,14 @@ Two interchangeable sources, both exposing:
     today_minutes(instrument) -> DataFrame[date, open, high, low, close]
     prev_day(instrument)      -> (prev_high, prev_low, prev_close) or None
 
-  • DhanSource — live data via the DhanHQ Data API (dhanhq SDK, lazily imported).
-  • DemoSource — replays a historical day from the project CSV up to an "as-of"
-    minute, so the whole pipeline is testable when the market is closed / no token.
+  • KotakNeoSource — live data via the Kotak Neo API (neo-api-client SDK,
+                     lazily imported).  Requires a pre-authenticated NeoAPI
+                     client object — the 3-step login (consumer_key/secret →
+                     mobilenumber+password → OTP) is handled in app.py and the
+                     authenticated client is stored in st.session_state.
+  • DemoSource     — replays a historical day from the project CSV up to an
+                     "as-of" minute, so the whole pipeline is testable when the
+                     market is closed / no token.
 """
 import pandas as pd
 from datetime import date, timedelta
@@ -16,71 +21,105 @@ import build_facts
 
 SQUARE_OFF_T = 15 * 60 + 15
 
-# Dhan index identifiers (override in live_config.json if they ever change)
-INSTRUMENTS = {
-    "NIFTY 50":   {"security_id": "13", "segment": "IDX_I", "type": "INDEX"},
-    "BANK NIFTY": {"security_id": "25", "segment": "IDX_I", "type": "INDEX"},
+# Kotak Neo instrument tokens (NSE standard tokens; update if master data changes)
+KOTAK_INSTRUMENTS = {
+    "NIFTY 50":   {"instrument_token": "26000", "exchange": "nse_cm"},
+    "BANK NIFTY": {"instrument_token": "26009", "exchange": "nse_cm"},
 }
 
 
-def _dhan_to_df(resp):
-    """Normalise a DhanHQ candle response into date/open/high/low/close."""
-    if not isinstance(resp, dict) or resp.get("status") not in ("success", None):
-        raise RuntimeError(f"Dhan API error: {resp}")
-    d = resp.get("data", resp)
-    ts = d.get("timestamp") or d.get("start_Time") or d.get("time")
-    if ts is None:
-        raise RuntimeError(f"Unexpected Dhan response shape: {list(d)[:8]}")
-    dt = pd.to_datetime(pd.Series(ts, dtype="float64"), unit="s", utc=True) \
-           .dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-    return pd.DataFrame({
-        "date": dt, "open": d["open"], "high": d["high"],
-        "low": d["low"], "close": d["close"],
-    })
+def _kotak_to_df(resp):
+    """
+    Parse a neo-api-client historical_candle_data response into a clean
+    date/open/high/low/close DataFrame.
 
+    The SDK returns either:
+      {"Success": [[datetime_str, O, H, L, C, V], ...]}
+    or occasionally a bare list.  We handle both shapes plus dict-of-rows.
+    """
+    candles = None
+    if isinstance(resp, dict):
+        # try common top-level keys
+        candles = (resp.get("Success") or resp.get("data")
+                   or resp.get("candles") or resp.get("result"))
+    elif isinstance(resp, list):
+        candles = resp
 
-class DhanSource:
-    def __init__(self, client_id, access_token, instruments=None):
-        self.instruments = instruments or INSTRUMENTS
-        try:
-            import dhanhq as _pkg
-            from dhanhq import dhanhq
-        except ImportError as e:
-            raise RuntimeError("Dhan SDK not installed — run:  pip install dhanhq") from e
-        # dhanhq >= 2.0 uses a DhanContext; older versions took (client_id, access_token)
-        ctx = getattr(_pkg, "DhanContext", None)
-        if ctx is not None:
-            self.dhan = dhanhq(ctx(client_id, access_token))
+    if not candles:
+        raise RuntimeError(f"No candle data from Kotak Neo: {str(resp)[:300]}")
+
+    rows = []
+    for c in candles:
+        if isinstance(c, (list, tuple)) and len(c) >= 5:
+            dt = pd.to_datetime(c[0])
+            o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+        elif isinstance(c, dict):
+            dt = pd.to_datetime(
+                c.get("time") or c.get("date") or c.get("datetime"))
+            o = float(c["open"]); h = float(c["high"])
+            l = float(c["low"]);  cl = float(c["close"])
         else:
-            self.dhan = dhanhq(client_id, access_token)
+            continue
+        # strip timezone info (IST timestamps come as "+05:30")
+        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+            try:
+                dt = dt.tz_convert("Asia/Kolkata").tz_localize(None)
+            except Exception:
+                dt = dt.replace(tzinfo=None)
+        rows.append({"date": dt, "open": o, "high": h, "low": l, "close": cl})
+
+    if not rows:
+        raise RuntimeError("No parseable candles in Kotak Neo response.")
+    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+
+
+class KotakNeoSource:
+    """
+    Wraps an already-authenticated neo_api_client.NeoAPI instance.
+    The NeoAPI client must have completed session_2fa() before being passed here.
+    """
+    def __init__(self, client, instruments=None):
+        self.client = client
+        self.instruments = instruments or KOTAK_INSTRUMENTS
 
     def _meta(self, instrument):
         m = self.instruments.get(instrument)
         if not m:
-            raise ValueError(f"No Dhan id configured for '{instrument}'")
+            raise ValueError(f"No Kotak Neo config for '{instrument}'")
         return m
 
     def today_minutes(self, instrument):
         m = self._meta(instrument)
-        today = date.today().isoformat()
-        resp = self.dhan.intraday_minute_data(
-            security_id=m["security_id"], exchange_segment=m["segment"],
-            instrument_type=m["type"], from_date=today, to_date=today)
-        return _dhan_to_df(resp)
+        today = date.today().strftime("%d/%m/%Y")
+        resp = self.client.historical_candle_data(
+            instrument_token=m["instrument_token"],
+            from_date=today, to_date=today,
+            resample="1", exchange=m["exchange"])
+        return _kotak_to_df(resp)
 
     def prev_day(self, instrument):
+        """
+        Returns (high, low, close) for the last completed trading day.
+        Fetches a rolling 10-day window of 1-min candles and aggregates by day
+        to avoid needing a separate daily-candle endpoint.
+        """
         m = self._meta(instrument)
-        to_d = date.today()
-        from_d = to_d - timedelta(days=12)
-        resp = self.dhan.historical_daily_data(
-            security_id=m["security_id"], exchange_segment=m["segment"],
-            instrument_type=m["type"], from_date=from_d.isoformat(), to_date=to_d.isoformat())
-        df = _dhan_to_df(resp)
-        df = df[df["date"].dt.date < to_d]
+        to_d = date.today() - timedelta(days=1)
+        from_d = to_d - timedelta(days=10)
+        resp = self.client.historical_candle_data(
+            instrument_token=m["instrument_token"],
+            from_date=from_d.strftime("%d/%m/%Y"),
+            to_date=to_d.strftime("%d/%m/%Y"),
+            resample="1", exchange=m["exchange"])
+        df = _kotak_to_df(resp)
         if df.empty:
             return None
-        last = df.iloc[-1]
-        return float(last["high"]), float(last["low"]), float(last["close"])
+        df["_day"] = df["date"].dt.date
+        last_day = df["_day"].max()
+        g = df[df["_day"] == last_day]
+        if g.empty:
+            return None
+        return float(g["high"].max()), float(g["low"].min()), float(g.iloc[-1]["close"])
 
 
 class DemoSource:
