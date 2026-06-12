@@ -486,6 +486,14 @@ def _dw_weekday_panel(day):
 
 
 def daywise_mode():
+    # Apply any deferred config writes from the optimizer "Apply" buttons. This must
+    # run BEFORE the weekday widgets are instantiated (Streamlit forbids writing a
+    # widget's session_state key once the widget exists in the same run).
+    pend = st.session_state.pop("dw_pending", None)
+    if pend:
+        for k, v in pend.items():
+            st.session_state[k] = v
+
     st.caption("Edgeful-style day-wise IB retracement · entry/stop in % of IB range "
                "(retracement) · targets in % of IB range (extension) · half at TP1, "
                "runner to TP2 with stop at breakeven")
@@ -629,18 +637,20 @@ def daywise_mode():
             best = res.iloc[0]
             bdir = best["direction"]
             if st.button(f"✅ Apply best {od} config ({bdir}) to the panel above"):
+                pend = {}
                 if st.session_state.get(f"dw_{od}_separate"):
                     # write into that direction's own params; leave the other side intact
                     for x in ("entry", "stop", "tp1", "tp2"):
-                        st.session_state[f"dw_{od}_{bdir}_{x}"] = int(best[x])
-                    st.session_state[f"dw_{od}_allow_{bdir}"] = True
+                        pend[f"dw_{od}_{bdir}_{x}"] = int(best[x])
+                    pend[f"dw_{od}_allow_{bdir}"] = True
                 else:
                     for x in ("entry", "stop", "tp1", "tp2"):
-                        st.session_state[f"dw_{od}_{x}"] = int(best[x])
-                    st.session_state[f"dw_{od}_allow_long"] = bdir == "long"
-                    st.session_state[f"dw_{od}_allow_short"] = bdir == "short"
-                st.session_state[f"dw_{od}_trade"] = True
-                del st.session_state["dw_opt_result"]
+                        pend[f"dw_{od}_{x}"] = int(best[x])
+                    pend[f"dw_{od}_allow_long"] = bdir == "long"
+                    pend[f"dw_{od}_allow_short"] = bdir == "short"
+                pend[f"dw_{od}_trade"] = True
+                st.session_state["dw_pending"] = pend       # applied at top of next run
+                st.session_state.pop("dw_opt_result", None)
                 st.rerun()
 
     # ── combined optimizer (all weekdays at once) ─────────────────────────────
@@ -686,14 +696,16 @@ def daywise_mode():
                        f"total net {co['net'].sum():,.0f} pts. In-sample optimum — "
                        "validate on a date sub-range before trusting it.")
             if st.button("✅ Apply ALL best configs to the panels above", key="dw_co_apply"):
+                pend = {}
                 for _, r in co.iterrows():
                     day = r["Day"]
                     for x in ("entry", "stop", "tp1", "tp2"):
-                        st.session_state[f"dw_{day}_{x}"] = int(r[x])
-                    st.session_state[f"dw_{day}_allow_long"] = r["direction"] == "long"
-                    st.session_state[f"dw_{day}_allow_short"] = r["direction"] == "short"
-                    st.session_state[f"dw_{day}_separate"] = False
-                    st.session_state[f"dw_{day}_trade"] = True
+                        pend[f"dw_{day}_{x}"] = int(r[x])
+                    pend[f"dw_{day}_allow_long"] = r["direction"] == "long"
+                    pend[f"dw_{day}_allow_short"] = r["direction"] == "short"
+                    pend[f"dw_{day}_separate"] = False
+                    pend[f"dw_{day}_trade"] = True
+                st.session_state["dw_pending"] = pend        # applied at top of next run
                 st.session_state.pop("dw_co_result", None)
                 st.rerun()
 

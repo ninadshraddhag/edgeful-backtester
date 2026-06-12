@@ -43,10 +43,16 @@ class DhanSource:
     def __init__(self, client_id, access_token, instruments=None):
         self.instruments = instruments or INSTRUMENTS
         try:
+            import dhanhq as _pkg
             from dhanhq import dhanhq
         except ImportError as e:
             raise RuntimeError("Dhan SDK not installed — run:  pip install dhanhq") from e
-        self.dhan = dhanhq(client_id, access_token)
+        # dhanhq >= 2.0 uses a DhanContext; older versions took (client_id, access_token)
+        ctx = getattr(_pkg, "DhanContext", None)
+        if ctx is not None:
+            self.dhan = dhanhq(ctx(client_id, access_token))
+        else:
+            self.dhan = dhanhq(client_id, access_token)
 
     def _meta(self, instrument):
         m = self.instruments.get(instrument)
