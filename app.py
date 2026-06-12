@@ -132,13 +132,15 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
         close = sess.iloc[-1]["close"]          # close AT square-off
         ph, pl, pt = post["high"].values, post["low"].values, post["t_min"].values
 
-        rec = {"date": pd.Timestamp(day), "range": rng, "day_close": close}
+        rec = {"date": pd.Timestamp(day), "range": rng, "day_close": close,
+               "win_hi": hi, "win_lo": lo}
 
         # LONG: enter at hi when high first exceeds hi
         le = np.where(ph > hi)[0]
         if len(le):
             et = pt[le[0]]
             rec["L_entry"] = hi
+            rec["L_entry_t"] = et
             for t in T_GRID:
                 idx = np.where((ph >= hi + t * rng) & (pt >= et))[0]
                 rec[f"L_T_{t}"] = pt[idx[0]] if len(idx) else np.nan
@@ -147,12 +149,14 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
                 rec[f"L_S_{s}"] = pt[idx[0]] if len(idx) else np.nan
         else:
             rec["L_entry"] = np.nan
+            rec["L_entry_t"] = np.nan
 
         # SHORT: enter at lo when low first breaks lo
         se = np.where(pl < lo)[0]
         if len(se):
             et = pt[se[0]]
             rec["S_entry"] = lo
+            rec["S_entry_t"] = et
             for t in T_GRID:
                 idx = np.where((pl <= lo - t * rng) & (pt >= et))[0]
                 rec[f"S_T_{t}"] = pt[idx[0]] if len(idx) else np.nan
@@ -161,6 +165,7 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
                 rec[f"S_S_{s}"] = pt[idx[0]] if len(idx) else np.nan
         else:
             rec["S_entry"] = np.nan
+            rec["S_entry_t"] = np.nan
 
         rows.append(rec)
 
@@ -261,6 +266,277 @@ def evaluate(P, logic, t, s, dows, gaps, kinds, first):
     pnl = logic_pnl(P, logic, t, s)
     mask = filter_mask(P, dows, gaps, kinds, first) & ~np.isnan(pnl)
     return pnl[mask], P.loc[mask, "date"].values
+
+
+# ─── trade log construction (entry/exit times) ────────────────────────────────
+
+def hhmm(m):
+    """Minutes-since-midnight → 'HH:MM' (NaN-safe)."""
+    if pd.isna(m):
+        return ""
+    m = int(m)
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def edge_trades(P, logic, t, s, dows, gaps, kinds, first, close_t):
+    """
+    Full per-trade log for one Edge configuration — entry/exit prices AND times.
+    Mirrors side_pnl()/logic_pnl() exactly (conservative stop-first tie rule),
+    so the summed pnl always matches the metrics shown above it.
+    """
+    mask = filter_mask(P, dows, gaps, kinds, first)
+    rows = []
+    for _, r in P[mask].iterrows():
+        # which side does this logic take today?
+        if logic == "long":
+            side = "long"
+        elif logic == "short":
+            side = "short"
+        elif logic == "fade":
+            side = "short" if r["first_side"] == "high" else "long"
+        elif logic == "gap":
+            if r["gap_type"] == "Gap Up":
+                side = "long"
+            elif r["gap_type"] == "Gap Down":
+                side = "short"
+            else:
+                continue                      # flat day → no trade
+        else:
+            side = "long"
+
+        pre = "L" if side == "long" else "S"
+        entry = r[f"{pre}_entry"]
+        if pd.isna(entry):
+            continue                          # that side never triggered today
+        rng = r["range"]
+        fpt = r[f"{pre}_T_{t}"]
+        fps = r[f"{pre}_S_{s}"]
+        fpt_i = np.inf if pd.isna(fpt) else fpt
+        fps_i = np.inf if pd.isna(fps) else fps
+
+        if np.isfinite(fpt_i) and fpt_i <= fps_i:          # target first
+            outcome, exit_t = "target", fpt
+            exit_px = entry + t * rng if side == "long" else entry - t * rng
+            pnl = t * rng
+        elif np.isfinite(fps_i):                           # stop first
+            outcome, exit_t = "stop", fps
+            exit_px = entry - s * rng if side == "long" else entry + s * rng
+            pnl = -s * rng
+        else:                                              # neither → square-off
+            outcome, exit_t = "squareoff", close_t
+            exit_px = r["day_close"]
+            pnl = (exit_px - entry) if side == "long" else (entry - exit_px)
+
+        risk = s * rng
+        rows.append({
+            "date": r["date"], "dow": r["dow"], "side": side,
+            "entry time": hhmm(r[f"{pre}_entry_t"]), "exit time": hhmm(exit_t),
+            "entry": round(float(entry), 2), "exit": round(float(exit_px), 2),
+            "target px": round(float(entry + t * rng if side == "long" else entry - t * rng), 2),
+            "stop px": round(float(entry - s * rng if side == "long" else entry + s * rng), 2),
+            "range": round(float(rng), 2),
+            "outcome": outcome, "pnl": round(float(pnl), 2),
+            "r_mult": round(float(pnl / risk), 3) if risk > 0 else np.nan,
+            "win": pnl > 0,
+            "gap": r["gap_type"], "day kind": r["day_kind"],
+            "first side": r["first_side"],
+            "win_hi": float(r["win_hi"]), "win_lo": float(r["win_lo"]),
+            "_entry_t": r[f"{pre}_entry_t"], "_exit_t": exit_t,
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["date", "_entry_t"]).reset_index(drop=True)
+
+
+EDGE_LOG_COLS = ["date", "dow", "side", "entry time", "exit time", "entry", "exit",
+                 "target px", "stop px", "range", "outcome", "pnl", "r_mult",
+                 "gap", "day kind", "first side"]
+
+
+def _edge_day_chart(day_df, tr, open_t, end_t):
+    """One trade drawn on its day's minute chart: opening-range box, TP/SL lines,
+    entry/exit markers — neat and self-explanatory."""
+    day = pd.Timestamp(tr["date"])
+    x = day_df["date"]
+    fig = go.Figure()
+    fig.add_candlestick(x=x, open=day_df["open"], high=day_df["high"],
+                        low=day_df["low"], close=day_df["close"], name="Price",
+                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
+    # opening-range box (ORB/IB window)
+    fig.add_shape(type="rect",
+                  x0=day + pd.Timedelta(minutes=open_t), x1=day + pd.Timedelta(minutes=end_t),
+                  y0=tr["win_lo"], y1=tr["win_hi"],
+                  fillcolor="rgba(96,125,139,0.15)", line=dict(width=1, color="#607D8B"))
+    x_entry = day + pd.Timedelta(minutes=int(tr["_entry_t"]))
+    x_exit = day + pd.Timedelta(minutes=int(tr["_exit_t"]))
+    # target / stop levels, drawn from entry to exit
+    for px, color, nm in [(tr["target px"], "#2E7D32", "target"),
+                          (tr["stop px"], "#C62828", "stop")]:
+        fig.add_shape(type="line", x0=x_entry, x1=x_exit, y0=px, y1=px,
+                      line=dict(width=1.5, color=color, dash="dash"))
+    long = tr["side"] == "long"
+    win_c = "#2E7D32" if tr["win"] else "#C62828"
+    fig.add_scatter(x=[x_entry], y=[tr["entry"]], mode="markers+text",
+                    marker=dict(symbol="triangle-up" if long else "triangle-down",
+                                size=14, color="#2E7D32" if long else "#C62828",
+                                line=dict(width=1, color="white")),
+                    text=[f"ENTRY {tr['entry time']}"],
+                    textposition="bottom center" if long else "top center",
+                    textfont=dict(size=10), showlegend=False)
+    fig.add_scatter(x=[x_exit], y=[tr["exit"]], mode="markers+text",
+                    marker=dict(symbol="x", size=11, color=win_c),
+                    text=[f"EXIT {tr['exit time']} ({tr['outcome']})"],
+                    textposition="top center", textfont=dict(size=10), showlegend=False)
+    fig.add_scatter(x=[x_entry, x_exit], y=[tr["entry"], tr["exit"]], mode="lines",
+                    line=dict(width=1.2, color=win_c, dash="dot"),
+                    showlegend=False, hoverinfo="skip")
+    fig.update_layout(height=480, template="plotly_white",
+                      xaxis_rangeslider_visible=False, margin=dict(t=30, b=10),
+                      title=f"{day:%a %d %b %Y} · {tr['side'].upper()} · "
+                            f"{tr['pnl']:+.1f} pts ({tr['r_mult']:+.2f}R)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _edge_trade_browser(trades, mpath, mtime, open_t, end_t, close_t, key):
+    """Pick any trade → see it on that day's minute chart."""
+    t_ = trades.reset_index(drop=True)
+    labels = [f"#{i+1} · {r['date']:%d %b %Y} {r['entry time']} · {r['side'].upper()} · "
+              f"{r['outcome']} · {r['pnl']:+.1f} pts" for i, r in t_.iterrows()]
+    sel = st.selectbox("Trade", range(len(t_)), format_func=lambda i: labels[i],
+                       key=f"{key}_tb")
+    tr = t_.iloc[sel]
+    mdf = load_min(mpath, mtime)
+    dd = mdf[(mdf["date_only"] == pd.Timestamp(tr["date"]).date())
+             & (mdf["t_min"] >= open_t) & (mdf["t_min"] <= close_t)]
+    if dd.empty:
+        st.info("No minute data for this trade's day.")
+        return
+    _edge_day_chart(dd, tr, open_t, end_t)
+    st.caption("Shaded box = ORB/IB window · green dashed = target · red dashed = stop · "
+               "▲/▼ entry · ✕ exit.")
+
+
+# ─── confluence portfolio (combine strategies) ────────────────────────────────
+
+def _confl_label(c):
+    inv = {v: k for k, v in SIDE_LOGICS.items()}
+    return (f"{inv.get(c['logic'], c['logic'])} · {c['t']}×/{c['s']}× · "
+            f"{c['dow'] or 'all days'} · gap:{c['gap'] or 'any'} · "
+            f"kind:{c['kind'] or 'any'} · first:{c['first'] or 'any'}")
+
+
+def _confl_add(specs):
+    comps = st.session_state.setdefault("edge_confl", [])
+    added = 0
+    for s_ in specs:
+        if s_ not in comps:
+            comps.append(s_)
+            added += 1
+    return added
+
+
+def confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t):
+    st.markdown("Combine several edge configurations into ONE portfolio — "
+                "uncorrelated strategies smooth the equity curve. Add components "
+                "from the **Single Strategy** tab or tick rows in the **Optimizer**.")
+    comps = st.session_state.setdefault("edge_confl", [])
+    if not comps:
+        st.info("No strategies added yet. Use “➕ Add this strategy to Confluence” on the "
+                "Single Strategy tab, or tick optimizer rows and click "
+                "“➕ Add ticked to Confluence”.")
+        return
+
+    cur = [c for c in comps if c["instrument"] == instrument and c["tag"] == tag]
+    other = len(comps) - len(cur)
+    list_df = pd.DataFrame({"#": range(1, len(comps) + 1),
+                            "strategy": [_confl_label(c) for c in comps],
+                            "instrument": [c["instrument"] for c in comps],
+                            "setup": [c["tag"].upper() for c in comps]})
+    st.dataframe(list_df, use_container_width=True, hide_index=True)
+    cdel = st.columns([2, 1, 1])
+    rm = cdel[0].multiselect("Remove #", list(range(1, len(comps) + 1)), key="confl_rm")
+    if cdel[1].button("Remove selected", use_container_width=True) and rm:
+        st.session_state["edge_confl"] = [c for i, c in enumerate(comps, 1) if i not in rm]
+        st.rerun()
+    if cdel[2].button("Clear all", use_container_width=True):
+        st.session_state["edge_confl"] = []
+        st.rerun()
+    if other:
+        st.caption(f"⚠ {other} component(s) belong to a different instrument/setup and are "
+                   f"excluded here — switch the sidebar to run them.")
+    if not cur:
+        st.warning(f"No components for {instrument} · {tag.upper()}.")
+        return
+
+    frames = []
+    for i, c in enumerate(cur, 1):
+        tr = edge_trades(P, c["logic"], c["t"], c["s"],
+                         [c["dow"]] if c["dow"] else DOW_ORDER,
+                         [c["gap"]] if c["gap"] else ["Gap Up", "Flat", "Gap Down"],
+                         [c["kind"]] if c["kind"] else ["Inside Day", "Normal", "Outside Day"],
+                         c["first"] or "", close_t)
+        if tr.empty:
+            continue
+        tr["strategy"] = f"#{i}"
+        frames.append(tr)
+    if not frames:
+        st.warning("No trades from the current components in this date range.")
+        return
+    T = pd.concat(frames).sort_values(["date", "_entry_t"]).reset_index(drop=True)
+
+    pnl = T["pnl"].to_numpy()
+    m = metrics(pnl)
+    k = st.columns(6)
+    k[0].metric("Strategies", len(frames))
+    k[1].metric("Trades", f"{m['trades']:,}")
+    k[2].metric("Win Rate", pct(m["win_rate"]))
+    k[3].metric("Net P&L", f"{m['net']:,.0f} pts")
+    k[4].metric("Expectancy", f"{m['expectancy']:.2f} pts/trade")
+    k[5].metric("Profit Factor", f"{m['pf']:.2f}" if np.isfinite(m["pf"]) else "∞")
+    rr = (m["avg_win"] / abs(m["avg_loss"])) if m["avg_loss"] else float("inf")
+    k2 = st.columns(4)
+    k2[0].metric("Max Drawdown", f"{m['max_dd']:,.0f} pts")
+    k2[1].metric("Avg Win", f"{m['avg_win']:.1f} pts")
+    k2[2].metric("Avg Loss", f"{m['avg_loss']:.1f} pts")
+    k2[3].metric("Avg RR (win/loss)", f"{rr:.2f}" if np.isfinite(rr) else "∞")
+
+    # combined equity + drawdown
+    cum = np.cumsum(pnl)
+    dd = cum - np.maximum.accumulate(cum)
+    dts = pd.to_datetime(T["date"])
+    fig = go.Figure()
+    fig.add_scatter(x=dts, y=cum, mode="lines", name="Portfolio equity",
+                    line=dict(color="#2196F3", width=2),
+                    fill="tozeroy", fillcolor="rgba(33,150,243,0.08)")
+    fig.update_layout(title="Combined equity (points, 1 unit per trade)", height=320,
+                      template="plotly_white", margin=dict(t=40, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+    figd = go.Figure()
+    figd.add_scatter(x=dts, y=dd, mode="lines", name="Drawdown",
+                     line=dict(color="#E53935", width=1.5),
+                     fill="tozeroy", fillcolor="rgba(229,57,53,0.15)")
+    figd.update_layout(title="Drawdown (points)", height=220, template="plotly_white",
+                       margin=dict(t=40, b=10))
+    st.plotly_chart(figd, use_container_width=True)
+
+    # per-strategy contribution
+    st.markdown("**Per-strategy contribution**")
+    contrib = (T.groupby("strategy")
+               .agg(trades=("pnl", "size"), net=("pnl", "sum"),
+                    win_rate=("win", "mean"), expectancy=("pnl", "mean")))
+    contrib["win_rate"] = (contrib["win_rate"] * 100).round(1)
+    contrib[["net", "expectancy"]] = contrib[["net", "expectancy"]].round(1)
+    st.dataframe(contrib, use_container_width=True)
+
+    with st.expander(f"📋 All portfolio trades ({len(T):,})"):
+        st.dataframe(T[["strategy"] + EDGE_LOG_COLS].sort_values("date", ascending=False),
+                     use_container_width=True, hide_index=True, height=360)
+    st.download_button("⬇ Download portfolio trades (CSV)",
+                       T[["strategy"] + EDGE_LOG_COLS].to_csv(index=False).encode(),
+                       file_name=f"confluence_{instrument.replace(' ', '_')}_{tag}.csv",
+                       mime="text/csv")
+    with st.expander("🔍 Trade browser"):
+        _edge_trade_browser(T, mpath, mtime, open_t, end_t, close_t, key="confl")
 
 
 # ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -536,6 +812,24 @@ def daywise_mode():
                                  "only count after the boundary has broken first.")
         entry_cond = ENTRY_CONDS[ec_label]
 
+        st.markdown("**🎯 IB directional filters** *(optional)*")
+        dir_filters = {
+            "long_first_low": st.checkbox(
+                "LONG only if IB LOW formed first", key="dw_flt_ll",
+                help="Low forms first, high later → bullish bias; otherwise skip longs."),
+            "long_close_above": st.checkbox(
+                "LONG only if IB closes ABOVE midpoint", key="dw_flt_lc",
+                help="IB's last candle closes above (IB High+Low)/2 → bullish confirmation."),
+            "short_first_high": st.checkbox(
+                "SHORT only if IB HIGH formed first", key="dw_flt_sh",
+                help="High forms first, low later → bearish bias; otherwise skip shorts."),
+            "short_close_below": st.checkbox(
+                "SHORT only if IB closes BELOW midpoint", key="dw_flt_sc",
+                help="IB's last candle closes below the midpoint → bearish confirmation."),
+        }
+        if any(dir_filters.values()):
+            st.caption("Filters apply to the backtest AND both optimizers.")
+
     with st.spinner(f"Indexing {instrument} minute data (first run is cached)…"):
         prepped = prep_daywise(instrument, mpath, mtime, open_t, close_t, ib_min)
     prepped = _filter_prepped(prepped, d0, d1)
@@ -608,7 +902,7 @@ def daywise_mode():
         configs = _dw_read_config()
         presets["last"] = configs          # auto-persist most recent config
         _save_presets(presets)
-        trades = daywise.run(prepped, configs, entry_cond)
+        trades = daywise.run(prepped, configs, entry_cond, dir_filters)
         with st.spinner("Building PDF report…"):
             try:
                 pdf_bytes = report.build_daywise_pdf(
@@ -648,7 +942,8 @@ def daywise_mode():
                 with st.spinner(f"Sweeping {opt_day} configurations…"):
                     res = daywise.optimize_weekday(
                         prepped[opt_day], opt_dirs, daywise.OPT_GRID,
-                        opt_metric, int(opt_min), entry_cond=entry_cond)
+                        opt_metric, int(opt_min), entry_cond=entry_cond,
+                        dir_filters=dir_filters)
                 if res.empty:
                     st.warning("No configs met the minimum-trades threshold.")
                 else:
@@ -696,7 +991,8 @@ def daywise_mode():
                 for i, day in enumerate(daywise.WEEKDAYS):
                     res = daywise.optimize_weekday(
                         prepped[day], co_dirs, daywise.OPT_GRID,
-                        co_metric, int(co_min), entry_cond=entry_cond)
+                        co_metric, int(co_min), entry_cond=entry_cond,
+                        dir_filters=dir_filters)
                     if not res.empty:
                         b = res.iloc[0]
                         rows.append({"Day": day, "direction": b["direction"],
@@ -1198,7 +1494,9 @@ def main():
         st.warning("No trading days in the selected date range.")
         st.stop()
 
-    tab1, tab2 = st.tabs(["🎯 Single Strategy", "🔬 Optimizer (permutations)"])
+    end_t = (open_t + 15 - 1) if tag == "orb" else (open_t + ib_min - 1)
+    tab1, tab2, tab3 = st.tabs(["🎯 Single Strategy", "🔬 Optimizer (permutations)",
+                                "🧩 Confluence (combine strategies)"])
 
     # ============================ SINGLE STRATEGY ============================
     with tab1:
@@ -1252,6 +1550,31 @@ def main():
 
             st.caption(f"{instrument} · {setup} · {logic_label} · "
                        f"target {t}× / stop {s}× (R:R {t/s:.1f}) · {m['trades']:,} trades")
+
+            # ── full trade log + visual browser + confluence hook ────────────
+            if st.button("➕ Add this strategy to Confluence", key="single_confl_add"):
+                spec = dict(instrument=instrument, tag=tag, logic=logic,
+                            t=float(t), s=float(s),
+                            dow=None if len(dows) == 5 else (dows[0] if len(dows) == 1 else None),
+                            gap=None if len(gaps) == 3 else (gaps[0] if len(gaps) == 1 else None),
+                            kind=None if len(kinds) == 3 else (kinds[0] if len(kinds) == 1 else None),
+                            first=first_f or None)
+                n = _confl_add([spec])
+                st.success("Added to the Confluence tab." if n else "Already in Confluence.")
+
+            trades = edge_trades(P, logic, t, s, dows, gaps, kinds, first_f, close_t)
+            if not trades.empty:
+                with st.expander(f"📋 All trades ({len(trades):,}) — entry & exit times"):
+                    st.dataframe(trades[EDGE_LOG_COLS].sort_values("date", ascending=False),
+                                 use_container_width=True, hide_index=True, height=380)
+                    st.download_button(
+                        "⬇ Download trades (CSV)",
+                        trades[EDGE_LOG_COLS].to_csv(index=False).encode(),
+                        file_name=f"edge_trades_{instrument.replace(' ', '_')}_{tag}.csv",
+                        mime="text/csv")
+                with st.expander("🔍 Trade browser — any trade on its day's chart"):
+                    _edge_trade_browser(trades, mpath, mtime, open_t, end_t, close_t,
+                                        key="single")
 
     # ============================ OPTIMIZER ============================
     with tab2:
@@ -1320,22 +1643,52 @@ def main():
 
             if not results:
                 st.warning("No configurations met the minimum-trades threshold. Lower it.")
+                st.session_state.pop("edge_opt_res", None)
             else:
                 res = pd.DataFrame(results)
                 res = res.sort_values(sort_metric, ascending=False).reset_index(drop=True)
-                st.success(f"{len(res):,} valid configurations · showing top 40 by {sort_label}")
-                st.dataframe(res.head(40), use_container_width=True, hide_index=True,
-                             column_config={
-                                 "win %": st.column_config.NumberColumn(format="%.1f"),
-                                 "expectancy": st.column_config.NumberColumn(format="%.2f"),
-                             })
-                st.download_button("⬇ Download all results",
-                                   res.to_csv(index=False).encode(),
-                                   file_name=f"optimizer_{instrument}_{tag}.csv",
-                                   mime="text/csv")
-                st.caption("Expectancy = avg pts/trade. Prefer configs with high trades + "
-                           "positive expectancy + shallow max-DD; treat extreme PF on few "
-                           "trades with suspicion (overfitting).")
+                st.session_state["edge_opt_res"] = res
+                st.session_state["edge_opt_ctx"] = (instrument, tag)
+
+        # results persist across reruns so rows can be ticked into the Confluence
+        res = st.session_state.get("edge_opt_res")
+        if res is not None and st.session_state.get("edge_opt_ctx") == (instrument, tag):
+            st.success(f"{len(res):,} valid configurations · top 40 shown — tick "
+                       f"**add** on any rows to combine them in the Confluence tab")
+            disp = res.head(40).copy()
+            disp.insert(0, "add", False)
+            edited = st.data_editor(
+                disp, use_container_width=True, hide_index=True, key="edge_opt_editor",
+                disabled=[c for c in disp.columns if c != "add"],
+                column_config={
+                    "add": st.column_config.CheckboxColumn("add", help="Tick → Confluence"),
+                    "win %": st.column_config.NumberColumn(format="%.1f"),
+                    "expectancy": st.column_config.NumberColumn(format="%.2f"),
+                })
+            picked = edited[edited["add"]]
+            if st.button(f"➕ Add ticked to Confluence ({len(picked)})",
+                         disabled=picked.empty, key="opt_confl_add"):
+                specs = [dict(instrument=instrument, tag=tag,
+                              logic=SIDE_LOGICS[r["side logic"]],
+                              t=float(r["target×"]), s=float(r["stop×"]),
+                              dow=None if r["weekday"] == "all" else r["weekday"],
+                              gap=None if r["gap"] == "any" else r["gap"],
+                              kind=None if r["day kind"] == "any" else r["day kind"],
+                              first=None if r["first"] == "any" else r["first"])
+                         for _, r in picked.iterrows()]
+                n = _confl_add(specs)
+                st.success(f"Added {n} strategy(ies) — open the 🧩 Confluence tab.")
+            st.download_button("⬇ Download all results",
+                               res.to_csv(index=False).encode(),
+                               file_name=f"optimizer_{instrument}_{tag}.csv",
+                               mime="text/csv")
+            st.caption("Expectancy = avg pts/trade. Prefer configs with high trades + "
+                       "positive expectancy + shallow max-DD; treat extreme PF on few "
+                       "trades with suspicion (overfitting).")
+
+    # ============================ CONFLUENCE ============================
+    with tab3:
+        confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t)
 
 
 if __name__ == "__main__":

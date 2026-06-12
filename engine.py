@@ -177,6 +177,12 @@ def build_features(df1m: pd.DataFrame, open_t: int, params: dict) -> pd.DataFram
     if htf_cols:
         X = pd.concat([X, _align_htf(X, H, htf_cols)], axis=1)
 
+    # halve memory (matters on Streamlit Cloud for XAUUSD's multi-million rows);
+    # float32 keeps ~7 significant digits — ample for index/futures/gold prices
+    for c in X.columns:
+        if X[c].dtype == np.float64:
+            X[c] = X[c].astype(np.float32)
+
     X.attrs["exec_tf"], X.attrs["htf_tf"] = exec_tf, htf_tf
     X.attrs["ema_periods"] = ema_periods
     return X

@@ -74,7 +74,7 @@ def _pct(x):
 
 # ─── cached loaders ───────────────────────────────────────────────────────────
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def _load(mpath, mtime):
     return build_facts.clean_min(data_store.read_minute(mpath))
 
@@ -85,9 +85,17 @@ def _bounds(mpath, mtime):
     return d.min(), d.max(), build_facts.detect_open_t(_load(mpath, mtime))
 
 
-@st.cache_data(show_spinner=True)
-def _features(mpath, mtime, open_t, sig):
+@st.cache_data(show_spinner=True, max_entries=2)
+def _features(mpath, mtime, open_t, sig, d0, d1):
+    """
+    Build features only for the chosen date range (plus a 90-day warmup so
+    EMAs/ATR/CPR are primed at d0). Keeps memory/time bounded on big 24h
+    instruments like XAUUSD — building 11 years when one is selected was the
+    cloud 'Oh no' crash. max_entries caps cache RAM on Streamlit Cloud.
+    """
     df = _load(mpath, mtime)
+    warm = (pd.Timestamp(d0) - pd.Timedelta(days=90)).date()
+    df = df[(df["date_only"] >= warm) & (df["date_only"] <= d1)]
     params = dict(sig)
     return engine.build_features(df, open_t, params)
 
@@ -727,7 +735,7 @@ def render(*_):
         params = _collect_params(settings, entry_conds, exit_conds)
         sig = tuple(sorted(params.items()))
         with st.spinner("Building features (cached after first run)…"):
-            X = _features(mpath, mtime, open_t, sig)
+            X = _features(mpath, mtime, open_t, sig, d0, d1)
         Xw = X[(X["date_only"] >= d0) & (X["date_only"] <= d1)].reset_index(drop=True)
         if Xw.empty:
             st.warning("No data in the selected date range.")
@@ -773,7 +781,8 @@ def render(*_):
     with t5:
         # the optimizer re-simulates, so it needs the FULL feature frame
         # (cached — this is instant after the first build)
-        Xf = _features(res["mpath"], res["mtime"], res["open_t"], res["sig"])
+        Xf = _features(res["mpath"], res["mtime"], res["open_t"], res["sig"],
+                       res["d0"], res["d1"])
         Xf = Xf[(Xf["date_only"] >= res["d0"])
                 & (Xf["date_only"] <= res["d1"])].reset_index(drop=True)
         _optimizer(Xf, res["strategy"], res["close_t"])

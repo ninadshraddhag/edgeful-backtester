@@ -85,9 +85,10 @@ def fair_value_gaps(frame: pd.DataFrame, min_gap_pct: float = 0.0) -> pd.DataFra
 
 # ─── Order Blocks (displacement-anchored) ─────────────────────────────────────
 
-def order_blocks(frame: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
+def order_blocks(frame: pd.DataFrame, lookback: int = 5,
+                 track_mitigation: bool = False) -> pd.DataFrame:
     """
-    Detect order blocks anchored to FVG displacement and track mitigation.
+    Detect order blocks anchored to FVG displacement.
 
     A bullish OB is the most recent bearish (close<open) candle within `lookback`
     bars before a bullish FVG's confirming candle; bearish OB mirrors this. The
@@ -98,6 +99,10 @@ def order_blocks(frame: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
         ob_zone_low, ob_zone_high      : float — the block's body range
         ob_mitigated                   : bool — this OB was later re-entered
                                           (set on the ORIGIN bar once mitigation occurs)
+
+    `track_mitigation` is OFF by default: the scan is O(blocks × future bars),
+    which on multi-year 1-min/5-min data (e.g. XAUUSD) takes minutes and is not
+    consumed by the strategy engine. Enable it only for targeted analysis.
     """
     n = len(frame)
     op = frame["open"].to_numpy(dtype=float)
@@ -133,14 +138,16 @@ def order_blocks(frame: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
                     zhigh[j] = max(op[j], cl[j])
                     break
 
-    # mitigation: a later bar trades back into the block's body range
-    ob_idx = np.where(bull_ob | bear_ob)[0]
-    for j in ob_idx:
-        z0, z1 = zlow[j], zhigh[j]
-        future_lo = lo[j + 1:]
-        future_hi = hi[j + 1:]
-        if np.any((future_hi >= z0) & (future_lo <= z1)):
-            mitig[j] = True
+    # mitigation: a later bar trades back into the block's body range.
+    # O(blocks × future) — opt-in only (see docstring).
+    if track_mitigation:
+        ob_idx = np.where(bull_ob | bear_ob)[0]
+        for j in ob_idx:
+            z0, z1 = zlow[j], zhigh[j]
+            future_lo = lo[j + 1:]
+            future_hi = hi[j + 1:]
+            if np.any((future_hi >= z0) & (future_lo <= z1)):
+                mitig[j] = True
 
     out = pd.DataFrame(index=frame.index)
     out["bull_ob"] = bull_ob

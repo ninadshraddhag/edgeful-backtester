@@ -90,6 +90,10 @@ def parse_query(q: str) -> dict:
         upd["f_first"] = "Low formed first"
     if "bank" in q:
         upd["f_instrument"] = "BANK NIFTY"
+    elif "nq" in q or "nasdaq" in q:
+        upd["f_instrument"] = "NQ"
+    elif "xau" in q or "gold" in q:
+        upd["f_instrument"] = "XAUUSD"
     elif "nifty" in q:
         upd["f_instrument"] = "NIFTY 50"
     if "orb" in q or "opening range" in q:
@@ -142,7 +146,8 @@ def gap_pd_table(s):
 
 def render():
     st.title("🎲 ORB / IB Probability Explorer")
-    st.caption("10 years · NIFTY 50 & BANK NIFTY · set filters to ask a question, or type one below")
+    st.caption("All loaded instruments (NIFTY 50 · BANK NIFTY · NQ · XAUUSD) · "
+               "set filters to ask a question, or type one below")
 
     if not os.path.exists(FACTS):
         st.error("Facts table not found.")
@@ -189,7 +194,10 @@ def render():
     # ── sidebar filters ───────────────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters  =  your question")
-        st.radio("Instrument", ["NIFTY 50", "BANK NIFTY"], key="f_instrument")
+        instruments = sorted(df["instrument"].unique())   # every instrument in facts
+        if st.session_state.get("f_instrument") not in instruments:
+            st.session_state["f_instrument"] = instruments[0]
+        st.radio("Instrument", instruments, key="f_instrument")
         st.radio("Setup", ["IB", "ORB (15 min)"], key="f_setup")
         st.select_slider("IB duration (min)", options=[30, 45, 60, 90, 120],
                          key="f_ibmin",
@@ -308,22 +316,23 @@ def render():
     st.markdown(f"#### {tag.upper()} close vs midpoint — confirmation of the fade")
     mid_col = f"{tag}_close_above_mid"
     if mid_col in sub.columns:
-        a = lf[lf[mid_col] == True]            # low first AND window closed above mid
-        b = hf[hf[mid_col] == False]           # high first AND window closed below mid
+        # NB: local names must not shadow the baseline stats dict `b` used below
+        lf_conf = lf[lf[mid_col] == True]      # low first AND window closed above mid
+        hf_conf = hf[hf[mid_col] == False]     # high first AND window closed below mid
         mp = st.columns(2)
         with mp[0]:
-            if len(a):
+            if len(lf_conf):
                 base_a = pct(lf[f"{tag}_high_break"].mean()) if len(lf) else "—"
-                mp[0].metric(f"LOW first + close ABOVE mid → HIGH breaks  (n={len(a):,})",
-                             pct(a[f"{tag}_high_break"].mean()),
+                mp[0].metric(f"LOW first + close ABOVE mid → HIGH breaks  (n={len(lf_conf):,})",
+                             pct(lf_conf[f"{tag}_high_break"].mean()),
                              f"vs {base_a} for all low-first days")
             else:
                 st.info("No days: low first + close above mid.")
         with mp[1]:
-            if len(b):
+            if len(hf_conf):
                 base_b = pct(hf[f"{tag}_low_break"].mean()) if len(hf) else "—"
-                mp[1].metric(f"HIGH first + close BELOW mid → LOW breaks  (n={len(b):,})",
-                             pct(b[f"{tag}_low_break"].mean()),
+                mp[1].metric(f"HIGH first + close BELOW mid → LOW breaks  (n={len(hf_conf):,})",
+                             pct(hf_conf[f"{tag}_low_break"].mean()),
                              f"vs {base_b} for all high-first days")
             else:
                 st.info("No days: high first + close below mid.")

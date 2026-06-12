@@ -72,11 +72,26 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
         Rg = H - L
         if Rg <= 0:
             continue
+        # IB context for the optional directional filters: which extreme of the
+        # IB formed first, and whether the IB's last candle closed above its mid
+        t_hi = win.loc[win["high"] >= H, "t_min"].min()
+        t_lo = win.loc[win["low"] <= L, "t_min"].min()
+        if t_hi < t_lo:
+            first_side = "high"
+        elif t_lo < t_hi:
+            first_side = "low"
+        else:                       # both in the same candle → use its colour
+            c0 = win.loc[win["t_min"] == t_hi].iloc[0]
+            first_side = "low" if c0["close"] >= c0["open"] else "high"
+        ib_close = float(win.iloc[-1]["close"])
+
         out[dow].append({
             "date": pd.Timestamp(day), "dow": dow,
             "H": float(H), "L": float(L), "Rg": float(Rg),
             "day_open": float(sess.iloc[0]["open"]),
             "close": float(sess.iloc[-1]["close"]),     # close AT the square-off
+            "first_side": first_side,
+            "close_above_mid": ib_close > (H + L) / 2,
             "ph": post["high"].values.astype(float),
             "pl": post["low"].values.astype(float),
             "pt": post["t_min"].values.astype(float),
@@ -193,7 +208,30 @@ def dir_params(cfg, is_long):
     return cfg["entry"], cfg["stop"], cfg["tp1"], cfg["tp2"]
 
 
-def sim_day(rec, cfg, entry_cond="any"):
+def dir_allowed(rec, is_long, dir_filters):
+    """
+    Optional IB directional filters (all default off):
+      long_first_low    — LONG only if the IB LOW formed first (high later)
+      long_close_above  — LONG only if the IB closed above its midpoint
+      short_first_high  — SHORT only if the IB HIGH formed first (low later)
+      short_close_below — SHORT only if the IB closed below its midpoint
+    """
+    if not dir_filters:
+        return True
+    if is_long:
+        if dir_filters.get("long_first_low") and rec.get("first_side") != "low":
+            return False
+        if dir_filters.get("long_close_above") and not rec.get("close_above_mid", True):
+            return False
+    else:
+        if dir_filters.get("short_first_high") and rec.get("first_side") != "high":
+            return False
+        if dir_filters.get("short_close_below") and rec.get("close_above_mid", False):
+            return False
+    return True
+
+
+def sim_day(rec, cfg, entry_cond="any", dir_filters=None):
     """All trades for one day under its weekday config (0, 1 or 2 directional trades)."""
     if not cfg.get("trade", True):
         return []
@@ -206,6 +244,8 @@ def sim_day(rec, cfg, entry_cond="any"):
         if is_long and not cfg["allow_long"]:
             continue
         if (not is_long) and not cfg["allow_short"]:
+            continue
+        if not dir_allowed(rec, is_long, dir_filters):
             continue
         e, s, t1, t2 = dir_params(cfg, is_long)
         res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond)
@@ -223,7 +263,7 @@ def sim_day(rec, cfg, entry_cond="any"):
     return trades
 
 
-def run(prepped: dict, configs: dict, entry_cond="any") -> pd.DataFrame:
+def run(prepped: dict, configs: dict, entry_cond="any", dir_filters=None) -> pd.DataFrame:
     """Run the full day-wise strategy across all weekdays. Returns trades DataFrame."""
     rows = []
     for dow, day_list in prepped.items():
@@ -231,7 +271,7 @@ def run(prepped: dict, configs: dict, entry_cond="any") -> pd.DataFrame:
         if not cfg:
             continue
         for rec in day_list:
-            rows.extend(sim_day(rec, cfg, entry_cond))
+            rows.extend(sim_day(rec, cfg, entry_cond, dir_filters))
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
@@ -264,7 +304,7 @@ def _metric(arr, name):
 
 
 def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None,
-                     entry_cond="any"):
+                     entry_cond="any", dir_filters=None):
     """
     Sweep entry/stop/tp1/tp2 × direction for one weekday's days.
     `directions` is a subset of {"long","short"}. Returns a ranked DataFrame.
@@ -282,6 +322,8 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
                         is_long = d == "long"
                         pnls = []
                         for rec in day_list:
+                            if not dir_allowed(rec, is_long, dir_filters):
+                                continue
                             res = trade_pnl(rec, entry, stop, tp1, tp2, is_long,
                                             cutoff, entry_cond)
                             if res is not None:
