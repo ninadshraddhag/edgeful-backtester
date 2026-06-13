@@ -136,6 +136,15 @@ def live_probabilities(facts, feat):
             "stats": prob_app.stats(chosen, "ib"),
         }
 
+    # expose the actual matched day RECORDS behind the headline odds so the UI
+    # can show the sample days (chart + table). `matched` == gapset when no
+    # first-side is known yet, else the first-side subset.
+    out["sample"] = matched.copy()
+    lbl = [feat.get("dow") or "", gt or "any gap"]
+    if fs:
+        lbl.append(f"IB {fs} formed first")
+    out["sample_label"] = " · ".join(x for x in lbl if x)
+
     out["pd_table"] = prob_app.gap_pd_table(base)
 
     if feat.get("ib_range"):

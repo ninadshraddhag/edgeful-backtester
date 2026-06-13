@@ -1367,6 +1367,142 @@ def _badge(label, value, tone="#455A64"):
             f"{label}: <b>{value}</b></span>")
 
 
+@st.cache_data(show_spinner=False, max_entries=4)
+def _norm_paths(mpath, mtime, open_t, ib_min, close_t, dates_key):
+    """
+    Normalized post-IB price paths for the given dates, in IB units:
+        y = (close − IB_low) / IB_range   →  IB low = 0.0, IB high = 1.0
+        x = minutes since the IB completed
+    Returns (grid_minutes, matrix[day × minute], list_of_dates). Days that end
+    early are NaN-padded so we can take a clean median/IQR across the sample.
+    """
+    full = load_min(mpath, mtime)
+    ib_end = open_t + ib_min - 1
+    dates = {pd.Timestamp(d).date() for d in dates_key}    # match date_only (datetime.date)
+    sub = full[full["date_only"].isin(dates)
+               & (full["t_min"] >= open_t) & (full["t_min"] <= close_t)]
+    grid = np.arange(1, close_t - ib_end + 1)            # 1 … last post-IB minute
+    rows, used = [], []
+    for d, g in sub.groupby("date_only", sort=True):
+        win = g[g["t_min"] <= ib_end]
+        post = g[g["t_min"] > ib_end]
+        if len(win) < 5 or post.empty:
+            continue
+        H, L = win["high"].max(), win["low"].min()
+        R = H - L
+        if R <= 0:
+            continue
+        rel = (post["t_min"] - ib_end).to_numpy()
+        norm = ((post["close"] - L) / R).to_numpy()
+        line = np.full(len(grid), np.nan)
+        idx = rel - 1
+        ok = (idx >= 0) & (idx < len(grid))
+        line[idx[ok]] = norm[ok]
+        rows.append(line)
+        used.append(pd.Timestamp(d))
+    mat = np.array(rows) if rows else np.empty((0, len(grid)))
+    return grid, mat, used
+
+
+def _live_sample_section(instrument, feat, probs, open_t):
+    """🗂 Sample days — the matched history behind today's odds (chart + table)."""
+    sample = probs.get("sample")
+    if sample is None or sample.empty:
+        return
+    label = probs.get("sample_label", "matching days")
+    with st.expander(f"🗂 Sample days — the **{len(sample):,}** matching days behind "
+                     f"these odds  ·  {label}", expanded=False):
+        # ── normalized post-IB path overlay ──────────────────────────────────
+        ib_min = int(feat.get("ib_min", 60))
+        close_t = feat.get("close_t", 15 * 60 + 15)
+        paths = pd.DataFrame()
+        try:
+            mpath = data_store.discover().get(instrument)
+            if mpath and "ib_high" in feat:
+                dates_key = tuple(sorted(pd.Timestamp(d) for d in sample["date"]))
+                grid, mat, used = _norm_paths(mpath, os.path.getmtime(mpath),
+                                              open_t, ib_min, close_t, dates_key)
+                if len(mat):
+                    fig = go.Figure()
+                    # individual days (cap the drawn lines for clarity)
+                    cap = 60
+                    draw = list(range(len(mat)))[-cap:]
+                    for j in draw:
+                        fig.add_scatter(x=grid, y=mat[j], mode="lines",
+                                        line=dict(width=0.6, color="rgba(120,144,156,0.30)"),
+                                        showlegend=False, hoverinfo="skip")
+                    # median + 25–75% band across ALL matched days
+                    with np.errstate(all="ignore"):
+                        med = np.nanmedian(mat, axis=0)
+                        q1 = np.nanpercentile(mat, 25, axis=0)
+                        q3 = np.nanpercentile(mat, 75, axis=0)
+                    fig.add_scatter(x=grid, y=q3, mode="lines", line=dict(width=0),
+                                    showlegend=False, hoverinfo="skip")
+                    fig.add_scatter(x=grid, y=q1, mode="lines", line=dict(width=0),
+                                    fill="tonexty", fillcolor="rgba(21,101,192,0.12)",
+                                    name="25–75% band")
+                    fig.add_scatter(x=grid, y=med, mode="lines",
+                                    line=dict(width=2.6, color="#1565C0"), name="Median path")
+                    # IB reference levels
+                    fig.add_hline(y=1.0, line=dict(width=1, dash="dash", color="#2E7D32"),
+                                  annotation_text="IB High", annotation_font_size=10)
+                    fig.add_hline(y=0.0, line=dict(width=1, dash="dash", color="#C62828"),
+                                  annotation_text="IB Low", annotation_font_size=10)
+                    # today's current normalized level
+                    if feat.get("ib_range") and feat.get("price") is not None \
+                            and feat.get("now_t") and feat["now_t"] > open_t + ib_min - 1:
+                        ty = (feat["price"] - feat["ib_low"]) / feat["ib_range"]
+                        tx = feat["now_t"] - (open_t + ib_min - 1)
+                        fig.add_scatter(x=[tx], y=[ty], mode="markers+text",
+                                        marker=dict(symbol="star", size=15, color="#FB8C00",
+                                                    line=dict(width=1, color="white")),
+                                        text=["TODAY now"], textposition="top center",
+                                        textfont=dict(size=10), name="Today")
+                    fig.update_layout(
+                        height=420, template="plotly_white",
+                        margin=dict(t=50, b=60),
+                        title=dict(text=f"How the {len(mat):,} matching days moved after "
+                                        f"the IB  ·  price in IB-range units",
+                                   x=0, xanchor="left", font=dict(size=15)),
+                        xaxis_title="minutes after IB completes",
+                        yaxis_title="price  (IB Low = 0 · IB High = 1)",
+                        legend=dict(orientation="h", yanchor="top", y=-0.18, x=0))
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption("Each thin grey line is one matching day; the blue line is "
+                               "the median and the band the middle 50%. ★ marks where "
+                               "today sits right now. Above 1 = broke IB high, below 0 = "
+                               "broke IB low."
+                               + (f" Showing the {cap} most recent of {len(mat):,} drawn."
+                                  if len(mat) > cap else ""))
+        except Exception as e:
+            st.caption(f"(Path chart unavailable: {e})")
+
+        # ── clean sample-days table ──────────────────────────────────────────
+        df = sample.copy()
+        df["IB Size %"] = (df["ib_range"] / df["day_open"] * 100).round(3)
+        tbl = pd.DataFrame({
+            "Date": pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d"),
+            "Weekday": df["dow"].str[:3],
+            "Gap": df["gap_type"],
+            "IB Range": df["ib_range"].round(1),
+            "IB Size %": df["IB Size %"],
+            "First side": df["ib_first_side"],
+            "Broke first": df["ib_break_first"],
+            "Broke IB-H": df["ib_high_break"],
+            "Broke IB-L": df["ib_low_break"],
+            "Up ext ×R": df["ib_up_ext"].round(2),
+            "Down ext ×R": df["ib_dn_ext"].round(2),
+            "Reached PDH": df["broke_pdh"],
+            "Reached PDL": df["broke_pdl"],
+        }).sort_values("Date", ascending=False)
+        st.markdown("**Matched days — full detail**")
+        st.dataframe(tbl, use_container_width=True, hide_index=True, height=300)
+        st.download_button(
+            "⬇ Download sample days (CSV)", tbl.to_csv(index=False).encode(),
+            file_name=f"sample_days_{instrument.replace(' ', '_')}.csv",
+            mime="text/csv", key="live_sample_dl")
+
+
 def _live_render(instrument, feat, probs, open_t):
     ist = pd.Timestamp.now(tz="Asia/Kolkata")
     st.markdown(f"#### {instrument} &nbsp;·&nbsp; {feat.get('phase','—')} "
@@ -1454,6 +1590,9 @@ def _live_render(instrument, feat, probs, open_t):
                    f"≥{sz['q2']:.2f}% wide"
                    + (" · also matched on IB first-side" if sz.get("with_first_side")
                       else " · first-side not applied (kept sample size up)"))
+
+    # ── sample days behind the odds (chart + table) ──────────────────────────
+    _live_sample_section(instrument, feat, probs, open_t)
 
     # ── PDH/PDL reach for today's gap ─────────────────────────────────────────
     pdt = probs.get("pd_table")
