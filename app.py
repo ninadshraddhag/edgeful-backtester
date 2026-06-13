@@ -33,7 +33,7 @@ import live_stats
 import report
 from datetime import time as dtime
 
-st.set_page_config(page_title="ORB/IB Strategy Suite", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Backtester Pro", page_icon="📈", layout="wide")
 
 HERE  = os.path.dirname(os.path.abspath(__file__))
 FACTS = os.path.join(HERE, "analysis", "facts.csv")
@@ -667,7 +667,7 @@ BRAND_HTML = """
   <span style="font-size:1.55rem;font-weight:800;letter-spacing:-0.02em;
         background:linear-gradient(90deg,#1565C0,#26A69A);
         -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-    ⚡ EDGEFUL</span><br>
+    ⚡ BACKTESTER PRO</span><br>
   <span style="color:#7b8aa0;font-size:0.78rem;letter-spacing:0.06em;
         text-transform:uppercase;">Quant Backtesting Suite</span>
 </div>
@@ -757,7 +757,7 @@ def data_sidebar(key):
     close_t = sq.hour * 60 + sq.minute
     if close_t != cur_c:
         data_store.set_close_override(choice, close_t, DEFAULT_CLOSE_T)
-    ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15, key=f"{key}_ibmin",
+    ib_min = int(st.number_input("IB duration (min)", 10, 240, 60, 10, key=f"{key}_ibmin",
                                  help="Initial Balance window length from the session open."))
     st.caption(f"Session open **{open_t//60:02d}:{open_t%60:02d}**"
                f"{' (auto)' if open_t == auto_t else ' (override)'} · "
@@ -982,6 +982,13 @@ def daywise_mode():
         if any(v for k, v in dir_filters.items() if k != "candle_min"):
             st.caption("Filters apply to the backtest AND both optimizers.")
 
+        vwap_exit = st.checkbox(
+            "🟠 Exit on VWAP close", key="dw_vwap_exit",
+            help="Optional momentum exit: close the position when a post-IB candle "
+                 "CLOSES on the wrong side of session VWAP — long exits on a close "
+                 "below VWAP, short on a close above. Intrabar stop/target still take "
+                 "priority; this exits the remainder at that bar's close.")
+
     with st.spinner(f"Indexing {instrument} minute data (first run is cached)…"):
         prepped = prep_daywise(instrument, mpath, mtime, open_t, close_t, ib_min)
     prepped = _filter_prepped(prepped, d0, d1)
@@ -1054,7 +1061,7 @@ def daywise_mode():
         configs = _dw_read_config()
         presets["last"] = configs          # auto-persist most recent config
         _save_presets(presets)
-        trades = daywise.run(prepped, configs, entry_cond, dir_filters)
+        trades = daywise.run(prepped, configs, entry_cond, dir_filters, vwap_exit)
         with st.spinner("Building PDF report…"):
             try:
                 pdf_bytes = report.build_daywise_pdf(
@@ -1096,7 +1103,7 @@ def daywise_mode():
                     res = daywise.optimize_weekday(
                         prepped[opt_day], opt_dirs, daywise.OPT_GRID,
                         opt_metric, int(opt_min), entry_cond=entry_cond,
-                        dir_filters=dir_filters)
+                        dir_filters=dir_filters, vwap_exit=vwap_exit)
                 if res.empty:
                     st.warning("No configs met the minimum-trades threshold.")
                 else:
@@ -1145,7 +1152,7 @@ def daywise_mode():
                     res = daywise.optimize_weekday(
                         prepped[day], co_dirs, daywise.OPT_GRID,
                         co_metric, int(co_min), entry_cond=entry_cond,
-                        dir_filters=dir_filters)
+                        dir_filters=dir_filters, vwap_exit=vwap_exit)
                     if not res.empty:
                         b = res.iloc[0]
                         rows.append({"Day": day, "direction": b["direction"],
@@ -1430,6 +1437,24 @@ def _live_render(instrument, feat, probs, open_t):
         if nlab < 30:
             st.warning(f"⚠ Only {nlab} historical matches — low confidence.")
 
+    # ── IB-size conditioned odds (gap + day + IB-size band) ───────────────────
+    sz = probs.get("size")
+    if sz and sz.get("stats"):
+        ss = sz["stats"]
+        st.markdown(f"##### Conditioned on IB size — today's IB is **{sz['today_pct']:.2f}%** "
+                    f"of price → **{sz['bucket']}** of historical "
+                    f"{feat.get('gap_type','')} {feat.get('dow','')} days")
+        c = st.columns(5)
+        c[0].metric("IB HIGH breaks", pct(ss["high"]))
+        c[1].metric("IB LOW breaks", pct(ss["low"]))
+        c[2].metric("BOTH sides", pct(ss["both"]))
+        c[3].metric("ONE side", pct(ss["one"]))
+        c[4].metric("Sample days", f"{sz['n']:,}")
+        st.caption(f"Size terciles for this gap+day: ≤{sz['q1']:.2f}% narrow · "
+                   f"≥{sz['q2']:.2f}% wide"
+                   + (" · also matched on IB first-side" if sz.get("with_first_side")
+                      else " · first-side not applied (kept sample size up)"))
+
     # ── PDH/PDL reach for today's gap ─────────────────────────────────────────
     pdt = probs.get("pd_table")
     if pdt is not None and not pdt.empty and feat.get("gap_type"):
@@ -1467,6 +1492,10 @@ def _live_render(instrument, feat, probs, open_t):
                     "reach %.": None if e["dn_p"] is None else round(e["dn_p"] * 100, 1),
                 } for e in ext])
                 st.dataframe(et, use_container_width=True, hide_index=True)
+                n_hi = probs.get("ext_n_hi"); n_lo = probs.get("ext_n_lo")
+                if n_hi is not None:
+                    st.caption(f"Bull reach % conditioned on **{n_hi:,}** high-broke-first "
+                               f"days · Bear on **{n_lo:,}** low-broke-first days.")
 
     # ── today's day-wise retracement plan (from saved preset) ─────────────────
     plan = []
@@ -1679,7 +1708,7 @@ def main():
     if not os.path.exists(FACTS):
         # first boot (e.g. fresh clone / Streamlit Cloud): build the facts
         # table from whatever instruments are available, instead of erroring.
-        st.title("📈 ORB / IB Strategy Suite")
+        st.title("📈 Backtester Pro")
         if not data_store.discover():
             st.error("No instrument data found. Add a `*_minute.csv` or "
                      "`*_minute.parquet` file to the `data/` folder (or upload "
@@ -1707,7 +1736,7 @@ def main():
         advanced_mode.render()
         return
 
-    st.title("📈 ORB / IB Strategy Suite")
+    st.title("📈 Backtester Pro")
     if mode == "Day-wise IB Retracement":
         daywise_mode()
         return

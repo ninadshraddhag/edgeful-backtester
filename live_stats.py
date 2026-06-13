@@ -112,12 +112,42 @@ def live_probabilities(facts, feat):
                 "base": float(matched[f"ib_{opp}_break"].mean()),
             }
 
+    # IB-SIZE conditioning: where does today's IB size sit in the historical
+    # distribution for this gap+day, and what are the odds for similarly-sized
+    # days? (gap & day-of-week are already applied above; this adds IB size.)
+    sz = feat.get("ib_size_pct")
+    if sz is not None and len(gapset) >= 30 and "day_open" in gapset.columns:
+        sizes = gapset["ib_range"] / gapset["day_open"] * 100
+        q1, q2 = float(sizes.quantile(1 / 3)), float(sizes.quantile(2 / 3))
+        if sz <= q1:
+            bucket, smask = "Narrow (smallest 1/3)", sizes <= q1
+        elif sz >= q2:
+            bucket, smask = "Wide (largest 1/3)", sizes >= q2
+        else:
+            bucket, smask = "Medium (middle 1/3)", (sizes > q1) & (sizes < q2)
+        size_set = gapset[smask]
+        # combine with the first-side match too, if it keeps a usable sample
+        size_fs = size_set[size_set["ib_first_side"] == fs] if fs else size_set
+        chosen = size_fs if len(size_fs) >= 30 else size_set
+        out["size"] = {
+            "today_pct": round(float(sz), 3), "bucket": bucket,
+            "q1": round(q1, 3), "q2": round(q2, 3),
+            "n": int(len(chosen)), "with_first_side": chosen is size_fs and bool(fs),
+            "stats": prob_app.stats(chosen, "ib"),
+        }
+
     out["pd_table"] = prob_app.gap_pd_table(base)
 
     if feat.get("ib_range"):
         src = matched if (fs and len(matched) >= 30) else gapset
-        ue, de = src["ib_up_ext"].dropna(), src["ib_dn_ext"].dropna()
+        # directionally conditioned: bull extension only on days the HIGH broke
+        # first, bear extension only on days the LOW broke first (see prob_app)
+        hi_first = src[src["ib_break_first"] == "high"]
+        lo_first = src[src["ib_break_first"] == "low"]
+        ue = hi_first["ib_up_ext"].dropna()
+        de = lo_first["ib_dn_ext"].dropna()
         out["ext_src_n"] = len(src)
+        out["ext_n_hi"], out["ext_n_lo"] = len(hi_first), len(lo_first)
         out["ext"] = [{
             "level": L,
             "up_price": feat["ib_high"] + L * feat["ib_range"],

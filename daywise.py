@@ -28,6 +28,8 @@ target are both touched in the same candle, the stop is assumed hit first.
 import numpy as np
 import pandas as pd
 
+import indicators as ind
+
 DEFAULT_OPEN_T  = 9 * 60 + 15   # 09:15 (NSE); auto-detected per instrument in the app
 DEFAULT_CLOSE_T = 15 * 60 + 15  # 15:15 square-off — positions force-exit, no overnight carry
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
@@ -57,6 +59,10 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
     """
     ib_end = open_t + ib_min - 1
     min_bars = min(20, max(5, int(ib_min * 0.66)))
+    # session VWAP for the optional "exit on close beyond VWAP" rule
+    if "vwap" not in min_df.columns:
+        min_df = min_df.copy()
+        min_df["vwap"] = ind.session_vwap(min_df).to_numpy()
     out = {d: [] for d in WEEKDAYS}
     for day, g0 in min_df.groupby("date_only", sort=True):
         dow = pd.Timestamp(day).day_name()
@@ -101,15 +107,31 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
             "ph": post["high"].values.astype(float),
             "pl": post["low"].values.astype(float),
             "pt": post["t_min"].values.astype(float),
+            "pc": post["close"].values.astype(float),     # post-IB closes (VWAP exit)
+            "pv": post["vwap"].values.astype(float),       # post-IB session VWAP
         })
     return out
 
 
-def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
+def _vwap_cross(close_px, vwap_px, is_long):
+    """True when a bar CLOSES on the wrong side of VWAP for the open position:
+    long → close below VWAP; short → close above VWAP."""
+    if vwap_px is None or np.isnan(vwap_px):
+        return False
+    return (close_px < vwap_px) if is_long else (close_px > vwap_px)
+
+
+def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close,
+             pc=None, pv=None, vwap_exit=False):
     """
     Scale-out simulation from entry bar `start`.
     Returns (pnl_points, outcome, exit_bar_index, final_exit_price).
+
+    Intrabar stop/target take priority (conservative); the optional VWAP-close
+    exit is evaluated at the bar's CLOSE, after stop/target, and closes the whole
+    remaining position (full pre-TP1, the runner post-TP1).
     """
+    use_vwap = vwap_exit and pv is not None and pc is not None
     realized = 0.0
     tp1_hit = False
     cur_stop = stop
@@ -118,14 +140,9 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
     while i < n:
         hi_b, lo_b = ph[i], pl[i]
         if not tp1_hit:
-            if is_long:
-                stop_hit  = lo_b <= cur_stop
-                tp1_reach = hi_b >= tp1
-                tp2_reach = hi_b >= tp2
-            else:
-                stop_hit  = hi_b >= cur_stop
-                tp1_reach = lo_b <= tp1
-                tp2_reach = lo_b <= tp2
+            stop_hit  = (lo_b <= cur_stop) if is_long else (hi_b >= cur_stop)
+            tp1_reach = (hi_b >= tp1) if is_long else (lo_b <= tp1)
+            tp2_reach = (hi_b >= tp2) if is_long else (lo_b <= tp2)
             if stop_hit:                                   # conservative: stop before tp
                 realized += (cur_stop - entry) if is_long else (entry - cur_stop)
                 return realized, "stop", i, cur_stop
@@ -137,17 +154,18 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
                     realized += 0.5 * ((tp2 - entry) if is_long else (entry - tp2))
                     return realized, "tp1+tp2", i, tp2
         else:
-            if is_long:
-                be_hit    = lo_b <= cur_stop
-                tp2_reach = hi_b >= tp2
-            else:
-                be_hit    = hi_b >= cur_stop
-                tp2_reach = lo_b <= tp2
+            be_hit    = (lo_b <= cur_stop) if is_long else (hi_b >= cur_stop)
+            tp2_reach = (hi_b >= tp2) if is_long else (lo_b <= tp2)
             if be_hit:
                 return realized, "tp1+be", i, cur_stop     # runner stopped at breakeven
             if tp2_reach:
                 realized += 0.5 * ((tp2 - entry) if is_long else (entry - tp2))
                 return realized, "tp1+tp2", i, tp2
+        # optional VWAP-close exit (whole remaining position, at this bar's close)
+        if use_vwap and _vwap_cross(pc[i], pv[i], is_long):
+            rem = 0.5 if tp1_hit else 1.0
+            realized += rem * ((pc[i] - entry) if is_long else (entry - pc[i]))
+            return realized, ("tp1+vwap" if tp1_hit else "vwap"), i, pc[i]
         i += 1
     # End-of-day: exit whatever remains at the close
     rem = 0.5 if tp1_hit else 1.0
@@ -156,7 +174,7 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close):
 
 
 def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
-              entry_cond="any"):
+              entry_cond="any", vwap_exit=False):
     """
     One directional trade on one day. Returns (pnl, outcome, entry, risk) or None.
     entry_cond:
@@ -200,7 +218,8 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
     if len(idx) == 0:
         return None
     pnl, outcome, exit_i, exit_px = _sim_dir(ph, pl, idx[0], entry, stop, tp1, tp2,
-                                             is_long, rec["close"])
+                                             is_long, rec["close"],
+                                             rec.get("pc"), rec.get("pv"), vwap_exit)
     extras = dict(entry_t=float(pt[idx[0]]), exit_t=float(pt[exit_i]),
                   exit_px=float(exit_px), stop_px=float(stop),
                   tp1_px=float(tp1), tp2_px=float(tp2))
@@ -266,7 +285,7 @@ def dir_allowed(rec, is_long, dir_filters):
     return True
 
 
-def sim_day(rec, cfg, entry_cond="any", dir_filters=None):
+def sim_day(rec, cfg, entry_cond="any", dir_filters=None, vwap_exit=False):
     """All trades for one day under its weekday config (0, 1 or 2 directional trades)."""
     if not cfg.get("trade", True):
         return []
@@ -283,7 +302,7 @@ def sim_day(rec, cfg, entry_cond="any", dir_filters=None):
         if not dir_allowed(rec, is_long, dir_filters):
             continue
         e, s, t1, t2 = dir_params(cfg, is_long)
-        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond)
+        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond, vwap_exit)
         if res is None:
             continue
         pnl, outcome, entry, risk, ext = res
@@ -304,7 +323,8 @@ def sim_day(rec, cfg, entry_cond="any", dir_filters=None):
     return trades
 
 
-def run(prepped: dict, configs: dict, entry_cond="any", dir_filters=None) -> pd.DataFrame:
+def run(prepped: dict, configs: dict, entry_cond="any", dir_filters=None,
+        vwap_exit=False) -> pd.DataFrame:
     """Run the full day-wise strategy across all weekdays. Returns trades DataFrame."""
     rows = []
     for dow, day_list in prepped.items():
@@ -312,7 +332,7 @@ def run(prepped: dict, configs: dict, entry_cond="any", dir_filters=None) -> pd.
         if not cfg:
             continue
         for rec in day_list:
-            rows.extend(sim_day(rec, cfg, entry_cond, dir_filters))
+            rows.extend(sim_day(rec, cfg, entry_cond, dir_filters, vwap_exit))
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
@@ -345,7 +365,7 @@ def _metric(arr, name):
 
 
 def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None,
-                     entry_cond="any", dir_filters=None):
+                     entry_cond="any", dir_filters=None, vwap_exit=False):
     """
     Sweep entry/stop/tp1/tp2 × direction for one weekday's days.
     `directions` is a subset of {"long","short"}. Returns a ranked DataFrame.
@@ -366,7 +386,7 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
                             if not dir_allowed(rec, is_long, dir_filters):
                                 continue
                             res = trade_pnl(rec, entry, stop, tp1, tp2, is_long,
-                                            cutoff, entry_cond)
+                                            cutoff, entry_cond, vwap_exit)
                             if res is not None:
                                 pnls.append(res[0])
                         if len(pnls) < min_trades:

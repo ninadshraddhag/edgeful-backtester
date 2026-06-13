@@ -199,10 +199,10 @@ def render():
             st.session_state["f_instrument"] = instruments[0]
         st.radio("Instrument", instruments, key="f_instrument")
         st.radio("Setup", ["IB", "ORB (15 min)"], key="f_setup")
-        st.select_slider("IB duration (min)", options=[30, 45, 60, 90, 120],
-                         key="f_ibmin",
-                         help="Length of the Initial Balance window from the open. "
-                              "Non-60 values recompute the stats live (cached).")
+        st.number_input("IB duration (min)", 10, 240, step=10, key="f_ibmin",
+                        help="Length of the Initial Balance window from the open, in "
+                             "10-min steps (e.g. 40, 50). Non-60 values recompute the "
+                             "stats live (cached).")
         tag  = "ib" if st.session_state["f_setup"].startswith("IB") else "orb"
         inst = st.session_state["f_instrument"]
 
@@ -343,41 +343,61 @@ def render():
         st.info("Rebuild the facts table (`python build_facts.py`) to enable this stat.")
 
     # ── EXTENSIONS & RETRACEMENTS ─────────────────────────────────────────────
+    # Directionally conditioned so the numbers are interpretable: a BULL extension
+    # is only meaningful on days the HIGH broke FIRST (a genuine upside breakout),
+    # and a BEAR extension only on days the LOW broke first. Mixing both directions
+    # into one pool would dilute the reading. Retracements follow the same rule —
+    # a bull retracement (pullback after the high broke) is measured on high-first
+    # days, a bear retracement on low-first days.
     st.divider()
     st.markdown(f"#### Extensions & Retracements  ·  measured in × {tag.upper()} range")
-    up_ext = sub[f"{tag}_up_ext"].dropna()
-    dn_ext = sub[f"{tag}_dn_ext"].dropna()
-    up_rt  = sub[f"{tag}_up_retr"].dropna()
-    dn_rt  = sub[f"{tag}_dn_retr"].dropna()
+    hi_first = sub[sub[f"{tag}_break_first"] == "high"]
+    lo_first = sub[sub[f"{tag}_break_first"] == "low"]
+    n_hi, n_lo = len(hi_first), len(lo_first)
+    up_ext = hi_first[f"{tag}_up_ext"].dropna()
+    dn_ext = lo_first[f"{tag}_dn_ext"].dropna()
+    up_rt  = hi_first[f"{tag}_up_retr"].dropna()
+    dn_rt  = lo_first[f"{tag}_dn_retr"].dropna()
+    st.caption(f"Conditioned on which side broke **first** → "
+               f"**{n_hi:,}** high-first days (bull) · **{n_lo:,}** low-first days (bear), "
+               f"of {len(sub):,} in this slice.")
 
     e = st.columns(4)
     e[0].metric(f"Bull ext ≥ {bull_ext:.2f}×",
                 pct((up_ext >= bull_ext).mean()) if len(up_ext) else "—",
-                help="Price reaches range_high + level×range after the window.")
+                f"of {n_hi:,} high-first days",
+                help="Given the HIGH broke first, P(price reaches "
+                     "range_high + level×range).")
     e[1].metric(f"Bear ext ≥ {bear_ext:.2f}×",
                 pct((dn_ext >= bear_ext).mean()) if len(dn_ext) else "—",
-                help="Price reaches range_low − level×range after the window.")
+                f"of {n_lo:,} low-first days",
+                help="Given the LOW broke first, P(price reaches "
+                     "range_low − level×range).")
     e[2].metric(f"Bull retr ≥ {bull_retr:.2f}×",
                 pct((up_rt >= bull_retr).mean()) if len(up_rt) else "—",
-                f"of {len(up_rt):,} up-break days",
-                help="After breaking the high, pulls back level×range below the high.")
+                f"of {len(up_rt):,} high-first days",
+                help="Given the HIGH broke first, P(pullback ≥ level×range below "
+                     "the high).")
     e[3].metric(f"Bear retr ≥ {bear_retr:.2f}×",
                 pct((dn_rt >= bear_retr).mean()) if len(dn_rt) else "—",
-                f"of {len(dn_rt):,} down-break days",
-                help="After breaking the low, bounces level×range above the low.")
+                f"of {len(dn_rt):,} low-first days",
+                help="Given the LOW broke first, P(bounce ≥ level×range above "
+                     "the low).")
 
     # extension probability curve
     levels = np.round(np.arange(0.1, 2.01, 0.1), 2)
     bull_curve = [(up_ext >= L).mean()*100 if len(up_ext) else 0 for L in levels]
     bear_curve = [(dn_ext >= L).mean()*100 if len(dn_ext) else 0 for L in levels]
     fig_e = go.Figure()
-    fig_e.add_scatter(x=levels, y=bull_curve, mode="lines+markers", name="Bull extension",
+    fig_e.add_scatter(x=levels, y=bull_curve, mode="lines+markers",
+                      name=f"Bull ext · high-first (n={n_hi:,})",
                       line=dict(color="#4CAF50", width=2))
-    fig_e.add_scatter(x=levels, y=bear_curve, mode="lines+markers", name="Bear extension",
+    fig_e.add_scatter(x=levels, y=bear_curve, mode="lines+markers",
+                      name=f"Bear ext · low-first (n={n_lo:,})",
                       line=dict(color="#F44336", width=2))
     fig_e.add_vline(x=bull_ext, line_dash="dot", line_color="#4CAF50")
     fig_e.add_vline(x=bear_ext, line_dash="dot", line_color="#F44336")
-    fig_e.update_layout(title="P(reach extension ≥ x) — how far price travels beyond the range",
+    fig_e.update_layout(title="P(reach extension ≥ x) given that side broke first",
                         xaxis_title="extension (× range)", yaxis_title="% of days",
                         height=340, template="plotly_white",
                         legend=dict(orientation="h", y=1.15))
