@@ -1636,6 +1636,50 @@ def _live_render(instrument, feat, probs, open_t):
                     st.caption(f"Bull reach % conditioned on **{n_hi:,}** high-broke-first "
                                f"days · Bear on **{n_lo:,}** low-broke-first days.")
 
+    # ── retracement probabilities (pull-back entry depth after a breakout) ─────
+    retr = probs.get("retr")
+    if retr:
+        st.markdown("##### Retracement probabilities — pull-back depth for a "
+                    "retracement ENTRY")
+        st.info("ℹ️ **A retracement is only valid while the IB boundary is NOT yet "
+                "breached.** These are forward-looking odds *if* the breakout then "
+                "happens: after the IB **high** breaks, how far price pulls back DOWN "
+                "(long entry); after the IB **low** breaks, how far it bounces UP "
+                "(short entry). “reach %” = chance the pull-back is at least this deep "
+                "(i.e. your retracement entry fills).")
+        hb, lb = feat.get("broke_ib_high"), feat.get("broke_ib_low")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            st.markdown(f"**Bull retracement** · after IB-high break · "
+                        f"n={probs.get('retr_n_hi', 0):,}")
+            if hb:
+                st.warning("⚠ IB **high already broken** today — the pure-retracement "
+                           "long is no longer valid (breakout occurred). Shown for "
+                           "reference / breakout-retest only.")
+            else:
+                st.success("✅ IB high intact — retracement long still valid.")
+            bt = pd.DataFrame([{
+                "× range": e["level"],
+                "Pull-back to": round(e["up_price"], 1),
+                "reach %": None if e["up_p"] is None else round(e["up_p"] * 100, 1),
+            } for e in retr])
+            st.dataframe(bt, use_container_width=True, hide_index=True)
+        with rc2:
+            st.markdown(f"**Bear retracement** · after IB-low break · "
+                        f"n={probs.get('retr_n_lo', 0):,}")
+            if lb:
+                st.warning("⚠ IB **low already broken** today — the pure-retracement "
+                           "short is no longer valid (breakout occurred). Shown for "
+                           "reference / breakout-retest only.")
+            else:
+                st.success("✅ IB low intact — retracement short still valid.")
+            bdt = pd.DataFrame([{
+                "× range": e["level"],
+                "Bounce to": round(e["dn_price"], 1),
+                "reach %": None if e["dn_p"] is None else round(e["dn_p"] * 100, 1),
+            } for e in retr])
+            st.dataframe(bdt, use_container_width=True, hide_index=True)
+
     # ── today's day-wise retracement plan (from saved preset) ─────────────────
     plan = []
     if feat.get("ib_high"):

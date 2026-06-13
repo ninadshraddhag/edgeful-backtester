@@ -12,6 +12,7 @@ import prob_app
 
 ORB_MIN, IB_MIN = 15, 60
 EXT_LEVELS = [0.25, 0.5, 1.0, 1.5, 2.0]
+RETR_LEVELS = [0.25, 0.382, 0.5, 0.618, 0.75]
 
 
 def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None,
@@ -164,4 +165,22 @@ def live_probabilities(facts, feat):
             "dn_price": feat["ib_low"] - L * feat["ib_range"],
             "dn_p": float((de >= L).mean()) if len(de) else None,
         } for L in EXT_LEVELS]
+
+        # RETRACEMENTS — the pull-back AFTER a breakout (retracement-entry depth).
+        # Bull = after the IB HIGH breaks, how far price pulls back DOWN toward the
+        # range (long entry); Bear = after the IB LOW breaks, how far it bounces UP.
+        # Conditioned on which side broke first, mirroring the extension panel.
+        # Only a valid FORWARD setup while that boundary is still intact today.
+        ur = hi_first["ib_up_retr"].dropna()
+        dr = lo_first["ib_dn_retr"].dropna()
+        out["retr_n_hi"], out["retr_n_lo"] = len(ur), len(dr)
+        out["retr"] = [{
+            "level": L,
+            "up_price": feat["ib_high"] - L * feat["ib_range"],   # pull-back below IB high
+            "up_p": float((ur >= L).mean()) if len(ur) else None,
+            "dn_price": feat["ib_low"] + L * feat["ib_range"],    # bounce above IB low
+            "dn_p": float((dr >= L).mean()) if len(dr) else None,
+        } for L in RETR_LEVELS]
+        out["broke_ib_high"] = feat.get("broke_ib_high")
+        out["broke_ib_low"] = feat.get("broke_ib_low")
     return out
