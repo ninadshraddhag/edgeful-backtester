@@ -1367,121 +1367,97 @@ def _badge(label, value, tone="#455A64"):
             f"{label}: <b>{value}</b></span>")
 
 
-@st.cache_data(show_spinner=False, max_entries=4)
-def _norm_paths(mpath, mtime, open_t, ib_min, close_t, dates_key):
-    """
-    Normalized post-IB price paths for the given dates, in IB units:
-        y = (close − IB_low) / IB_range   →  IB low = 0.0, IB high = 1.0
-        x = minutes since the IB completed
-    Returns (grid_minutes, matrix[day × minute], list_of_dates). Days that end
-    early are NaN-padded so we can take a clean median/IQR across the sample.
-    """
-    full = load_min(mpath, mtime)
-    ib_end = open_t + ib_min - 1
-    dates = {pd.Timestamp(d).date() for d in dates_key}    # match date_only (datetime.date)
-    sub = full[full["date_only"].isin(dates)
-               & (full["t_min"] >= open_t) & (full["t_min"] <= close_t)]
-    grid = np.arange(1, close_t - ib_end + 1)            # 1 … last post-IB minute
-    rows, used = [], []
-    for d, g in sub.groupby("date_only", sort=True):
-        win = g[g["t_min"] <= ib_end]
-        post = g[g["t_min"] > ib_end]
-        if len(win) < 5 or post.empty:
-            continue
-        H, L = win["high"].max(), win["low"].min()
-        R = H - L
-        if R <= 0:
-            continue
-        rel = (post["t_min"] - ib_end).to_numpy()
-        norm = ((post["close"] - L) / R).to_numpy()
-        line = np.full(len(grid), np.nan)
-        idx = rel - 1
-        ok = (idx >= 0) & (idx < len(grid))
-        line[idx[ok]] = norm[ok]
-        rows.append(line)
-        used.append(pd.Timestamp(d))
-    mat = np.array(rows) if rows else np.empty((0, len(grid)))
-    return grid, mat, used
+def _live_sample_day_chart(day_df, row, open_t, ib_min, close_t):
+    """One matched day's session as clean candlesticks: IB box, IB high/low,
+    PDH/PDL, with a descriptive title."""
+    day = pd.Timestamp(row["date"])
+    x = day_df["date"]
+    fig = go.Figure()
+    fig.add_candlestick(x=x, open=day_df["open"], high=day_df["high"],
+                        low=day_df["low"], close=day_df["close"], name="Price",
+                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
+    # IB window box
+    ib_x0 = day + pd.Timedelta(minutes=open_t)
+    ib_x1 = day + pd.Timedelta(minutes=open_t + ib_min - 1)
+    if pd.notna(row.get("ib_high")) and pd.notna(row.get("ib_low")):
+        fig.add_shape(type="rect", x0=ib_x0, x1=ib_x1,
+                      y0=row["ib_low"], y1=row["ib_high"],
+                      fillcolor="rgba(96,125,139,0.16)", line=dict(width=1, color="#607D8B"))
+        fig.add_annotation(x=ib_x0, y=row["ib_high"], text="IB", showarrow=False,
+                           yshift=8, font=dict(size=10, color="#607D8B"))
+        # IB high/low extended across the rest of the session
+        fig.add_shape(type="line", x0=ib_x1, x1=x.iloc[-1], y0=row["ib_high"],
+                      y1=row["ib_high"], line=dict(width=1, dash="dot", color="#2E7D32"))
+        fig.add_shape(type="line", x0=ib_x1, x1=x.iloc[-1], y0=row["ib_low"],
+                      y1=row["ib_low"], line=dict(width=1, dash="dot", color="#C62828"))
+    # PDH / PDL
+    for lvl, nm, col in [(row.get("pdh"), "PDH", "#6A1B9A"),
+                         (row.get("pdl"), "PDL", "#6A1B9A")]:
+        if pd.notna(lvl):
+            fig.add_hline(y=float(lvl), line=dict(width=1, dash="dash", color=col),
+                          annotation_text=nm, annotation_font_size=10)
+    first = (row.get("ib_first_side") or "?").upper()
+    brk = (row.get("ib_break_first") or "none")
+    ue, de = row.get("ib_up_ext"), row.get("ib_dn_ext")
+    ext_txt = (f"up {ue:.2f}×R" if pd.notna(ue) else "—") + " / " + \
+              (f"dn {de:.2f}×R" if pd.notna(de) else "—")
+    fig.update_layout(
+        height=460, template="plotly_white", xaxis_rangeslider_visible=False,
+        margin=dict(t=46, b=10),
+        title=dict(text=f"{day:%a %d %b %Y}  ·  {row.get('gap_type','')}  ·  "
+                        f"{first} formed first  ·  broke {brk} first  ·  ext {ext_txt}",
+                   x=0, xanchor="left", font=dict(size=14)))
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _live_sample_section(instrument, feat, probs, open_t):
-    """🗂 Sample days — the matched history behind today's odds (chart + table)."""
+    """🗂 Sample days — pick any matched day to see its clean candlestick chart."""
     sample = probs.get("sample")
     if sample is None or sample.empty:
         return
     label = probs.get("sample_label", "matching days")
+    ib_min = int(feat.get("ib_min", 60))
+    close_t = feat.get("close_t", 15 * 60 + 15)
+
     with st.expander(f"🗂 Sample days — the **{len(sample):,}** matching days behind "
                      f"these odds  ·  {label}", expanded=False):
-        # ── normalized post-IB path overlay ──────────────────────────────────
-        ib_min = int(feat.get("ib_min", 60))
-        close_t = feat.get("close_t", 15 * 60 + 15)
-        paths = pd.DataFrame()
-        try:
-            mpath = data_store.discover().get(instrument)
-            if mpath and "ib_high" in feat:
-                dates_key = tuple(sorted(pd.Timestamp(d) for d in sample["date"]))
-                grid, mat, used = _norm_paths(mpath, os.path.getmtime(mpath),
-                                              open_t, ib_min, close_t, dates_key)
-                if len(mat):
-                    fig = go.Figure()
-                    # individual days (cap the drawn lines for clarity)
-                    cap = 60
-                    draw = list(range(len(mat)))[-cap:]
-                    for j in draw:
-                        fig.add_scatter(x=grid, y=mat[j], mode="lines",
-                                        line=dict(width=0.6, color="rgba(120,144,156,0.30)"),
-                                        showlegend=False, hoverinfo="skip")
-                    # median + 25–75% band across ALL matched days
-                    with np.errstate(all="ignore"):
-                        med = np.nanmedian(mat, axis=0)
-                        q1 = np.nanpercentile(mat, 25, axis=0)
-                        q3 = np.nanpercentile(mat, 75, axis=0)
-                    fig.add_scatter(x=grid, y=q3, mode="lines", line=dict(width=0),
-                                    showlegend=False, hoverinfo="skip")
-                    fig.add_scatter(x=grid, y=q1, mode="lines", line=dict(width=0),
-                                    fill="tonexty", fillcolor="rgba(21,101,192,0.12)",
-                                    name="25–75% band")
-                    fig.add_scatter(x=grid, y=med, mode="lines",
-                                    line=dict(width=2.6, color="#1565C0"), name="Median path")
-                    # IB reference levels
-                    fig.add_hline(y=1.0, line=dict(width=1, dash="dash", color="#2E7D32"),
-                                  annotation_text="IB High", annotation_font_size=10)
-                    fig.add_hline(y=0.0, line=dict(width=1, dash="dash", color="#C62828"),
-                                  annotation_text="IB Low", annotation_font_size=10)
-                    # today's current normalized level
-                    if feat.get("ib_range") and feat.get("price") is not None \
-                            and feat.get("now_t") and feat["now_t"] > open_t + ib_min - 1:
-                        ty = (feat["price"] - feat["ib_low"]) / feat["ib_range"]
-                        tx = feat["now_t"] - (open_t + ib_min - 1)
-                        fig.add_scatter(x=[tx], y=[ty], mode="markers+text",
-                                        marker=dict(symbol="star", size=15, color="#FB8C00",
-                                                    line=dict(width=1, color="white")),
-                                        text=["TODAY now"], textposition="top center",
-                                        textfont=dict(size=10), name="Today")
-                    fig.update_layout(
-                        height=420, template="plotly_white",
-                        margin=dict(t=50, b=60),
-                        title=dict(text=f"How the {len(mat):,} matching days moved after "
-                                        f"the IB  ·  price in IB-range units",
-                                   x=0, xanchor="left", font=dict(size=15)),
-                        xaxis_title="minutes after IB completes",
-                        yaxis_title="price  (IB Low = 0 · IB High = 1)",
-                        legend=dict(orientation="h", yanchor="top", y=-0.18, x=0))
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.caption("Each thin grey line is one matching day; the blue line is "
-                               "the median and the band the middle 50%. ★ marks where "
-                               "today sits right now. Above 1 = broke IB high, below 0 = "
-                               "broke IB low."
-                               + (f" Showing the {cap} most recent of {len(mat):,} drawn."
-                                  if len(mat) > cap else ""))
-        except Exception as e:
-            st.caption(f"(Path chart unavailable: {e})")
-
-        # ── clean sample-days table ──────────────────────────────────────────
         df = sample.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date", ascending=False).reset_index(drop=True)
         df["IB Size %"] = (df["ib_range"] / df["day_open"] * 100).round(3)
+
+        # one-click picker: choose any day → see its candlestick
+        st.caption("👆 Pick any matching day to see its session as a clean "
+                   "candlestick chart (IB box · IB high/low · PDH/PDL).")
+        labels = [f"{r.date:%d %b %Y} · {str(r.dow)[:3]} · {r.gap_type} · "
+                  f"{r.ib_first_side} first · broke {r.ib_break_first} · "
+                  f"ext up {r.ib_up_ext:.2f}/dn {r.ib_dn_ext:.2f}×R"
+                  for r in df.itertuples()]
+        sel = st.selectbox("Matched day", range(len(df)),
+                           format_func=lambda i: labels[i], key="live_sample_pick")
+        row = df.iloc[sel]
+
+        mpath = data_store.discover().get(instrument)
+        if mpath:
+            full = load_min(mpath, os.path.getmtime(mpath))
+            dd = full[(full["date_only"] == row["date"].date())
+                      & (full["t_min"] >= open_t) & (full["t_min"] <= close_t)]
+            if dd.empty:
+                st.info("No minute data for this day.")
+            else:
+                _live_sample_day_chart(dd, row, open_t, ib_min, close_t)
+                k = st.columns(5)
+                k[0].metric("IB High", f"{row['ib_high']:,.1f}")
+                k[1].metric("IB Low", f"{row['ib_low']:,.1f}")
+                k[2].metric("IB Range", f"{row['ib_range']:,.1f}")
+                k[3].metric("Broke IB-H", "Yes" if row["ib_high_break"] else "No")
+                k[4].metric("Broke IB-L", "Yes" if row["ib_low_break"] else "No")
+        else:
+            st.info("Minute history for this instrument isn't available to chart.")
+
+        # full list + CSV
         tbl = pd.DataFrame({
-            "Date": pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d"),
+            "Date": df["date"].dt.strftime("%Y-%m-%d"),
             "Weekday": df["dow"].str[:3],
             "Gap": df["gap_type"],
             "IB Range": df["ib_range"].round(1),
@@ -1494,9 +1470,9 @@ def _live_sample_section(instrument, feat, probs, open_t):
             "Down ext ×R": df["ib_dn_ext"].round(2),
             "Reached PDH": df["broke_pdh"],
             "Reached PDL": df["broke_pdl"],
-        }).sort_values("Date", ascending=False)
-        st.markdown("**Matched days — full detail**")
-        st.dataframe(tbl, use_container_width=True, hide_index=True, height=300)
+        })
+        with st.expander(f"📋 All {len(tbl):,} matched days — full detail"):
+            st.dataframe(tbl, use_container_width=True, hide_index=True, height=300)
         st.download_button(
             "⬇ Download sample days (CSV)", tbl.to_csv(index=False).encode(),
             file_name=f"sample_days_{instrument.replace(' ', '_')}.csv",
