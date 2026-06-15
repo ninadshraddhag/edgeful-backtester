@@ -440,61 +440,91 @@ def _equity_tab(eq_df):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _trade_chart(V, tr, ema_cols):
-    """Single-day chart of one trade: candles, EMAs, levels, FVGs, the trade."""
+# ── clean, TradingView-style chart primitives (shared by the browsers) ─────────
+CANDLE_UP, CANDLE_DN = "#089981", "#F23645"     # TradingView green / red
+
+
+def _clean_candles(fig, x, V):
+    fig.add_candlestick(
+        x=x, open=V["open"], high=V["high"], low=V["low"], close=V["close"],
+        name="Price", line=dict(width=1),
+        increasing=dict(line=dict(color=CANDLE_UP, width=1), fillcolor=CANDLE_UP),
+        decreasing=dict(line=dict(color=CANDLE_DN, width=1), fillcolor=CANDLE_DN))
+
+
+def _clean_layout(fig, height=520, title=None):
+    fig.update_layout(
+        height=height, template="plotly_white", xaxis_rangeslider_visible=False,
+        margin=dict(t=42 if title else 14, b=16, l=8, r=8),
+        plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified",
+        dragmode="pan",
+        title=(dict(text=title, x=0, xanchor="left", font=dict(size=13)) if title else None),
+        legend=dict(orientation="h", y=1.0, yanchor="bottom", x=0,
+                    font=dict(size=10), bgcolor="rgba(255,255,255,0.65)"),
+        xaxis=dict(showgrid=False, showline=True, linecolor="rgba(0,0,0,0.18)",
+                   ticks="outside", tickcolor="rgba(0,0,0,0.18)",
+                   rangebreaks=[dict(bounds=["sat", "mon"])]),
+        yaxis=dict(side="right", showgrid=True, gridcolor="rgba(0,0,0,0.05)",
+                   zeroline=False, showline=False))
+
+
+def _trade_chart(V, tr, ema_cols, show):
+    """Clean single-trade chart. Heavy overlays are opt-in via `show`."""
     x = V["open_time"]
     fig = go.Figure()
-    fig.add_candlestick(x=x, open=V["open"], high=V["high"], low=V["low"],
-                        close=V["close"], name="Price",
-                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
-    palette = ["#FB8C00", "#8E24AA", "#1E88E5", "#00897B"]
-    for i, col in enumerate(ema_cols):
-        if col in V and V[col].notna().any():
-            fig.add_scatter(x=x, y=V[col], mode="lines", name=col.replace("ema_", "EMA "),
-                            line=dict(width=1.3, color=palette[i % len(palette)]))
-    if "vwap" in V and V["vwap"].notna().any():
+    _clean_candles(fig, x, V)
+
+    if show.get("ema"):
+        palette = ["#2962FF", "#FF6D00", "#AB47BC", "#00897B"]
+        for i, col in enumerate(ema_cols):
+            if col in V and V[col].notna().any():
+                fig.add_scatter(x=x, y=V[col], mode="lines",
+                                name=col.replace("ema_", "EMA "),
+                                line=dict(width=1.2, color=palette[i % len(palette)]))
+    if show.get("vwap") and "vwap" in V and V["vwap"].notna().any():
         fig.add_scatter(x=x, y=V["vwap"], mode="lines", name="VWAP",
-                        line=dict(width=1.6, color="#FFB300"))
-    for col, nm, color in [("pdh", "PDH", "#455A64"), ("pdl", "PDL", "#455A64"),
-                           ("cpr_top", "CPR top", "#7E57C2"),
-                           ("cpr_bottom", "CPR bot", "#7E57C2")]:
-        v = V[col].dropna()
-        if len(v):
-            fig.add_hline(y=float(v.iloc[0]), line=dict(width=1, dash="dash", color=color),
-                          annotation_text=nm, annotation_font_size=10)
-    # FVG zones that confirmed during this day
-    for _, r in V[(V["bull_fvg"]) | (V["bear_fvg"])].iterrows():
-        bull = bool(r["bull_fvg"])
-        fig.add_shape(type="rect", x0=r["open_time"], x1=x.iloc[-1],
-                      y0=r["fvg_gap_bottom"], y1=r["fvg_gap_top"],
-                      fillcolor=("rgba(38,166,154,0.13)" if bull else "rgba(239,83,80,0.13)"),
-                      line_width=0, layer="below")
-    # the trade itself
+                        line=dict(width=1.4, color="#FFB300"))
+    if show.get("levels"):
+        for col, nm, color in [("pdh", "PDH", "#455A64"), ("pdl", "PDL", "#455A64"),
+                               ("cpr_top", "CPR top", "#7E57C2"),
+                               ("cpr_bottom", "CPR bot", "#7E57C2")]:
+            v = V[col].dropna()
+            if len(v):
+                fig.add_hline(y=float(v.iloc[0]),
+                              line=dict(width=1, dash="dash", color=color),
+                              annotation_text=nm, annotation_font_size=9)
+    if show.get("fvg"):
+        for _, r in V[(V["bull_fvg"]) | (V["bear_fvg"])].iterrows():
+            bull = bool(r["bull_fvg"])
+            fig.add_shape(type="rect", x0=r["open_time"], x1=x.iloc[-1],
+                          y0=r["fvg_gap_bottom"], y1=r["fvg_gap_top"],
+                          fillcolor=("rgba(8,153,129,0.10)" if bull else "rgba(242,54,69,0.10)"),
+                          line_width=0, layer="below")
+
+    # the trade itself — kept prominent and minimal
     long = tr["direction"] == "long"
     win_c = "#2E7D32" if tr["win"] else "#C62828"
-    fig.add_scatter(x=[tr["entry_time"]], y=[tr["entry"]], mode="markers+text",
+    fig.add_scatter(x=[tr["entry_time"]], y=[tr["entry"]], mode="markers",
                     marker=dict(symbol="triangle-up" if long else "triangle-down",
-                                size=14, color="#2E7D32" if long else "#C62828",
+                                size=13, color="#2E7D32" if long else "#C62828",
                                 line=dict(width=1, color="white")),
-                    text=["ENTRY"], textposition="bottom center" if long else "top center",
-                    textfont=dict(size=10), showlegend=False)
-    fig.add_scatter(x=[tr["exit_time"]], y=[tr["exit"]], mode="markers+text",
-                    marker=dict(symbol="x", size=11, color=win_c),
-                    text=[f"EXIT ({tr['outcome']})"], textposition="top center",
-                    textfont=dict(size=10), showlegend=False)
+                    name="Entry", showlegend=False,
+                    hovertext=f"entry {tr['entry']:.2f}", hoverinfo="text")
+    fig.add_scatter(x=[tr["exit_time"]], y=[tr["exit"]], mode="markers",
+                    marker=dict(symbol="x", size=10, color=win_c),
+                    name="Exit", showlegend=False,
+                    hovertext=f"exit {tr['exit']:.2f} ({tr['outcome']})", hoverinfo="text")
     fig.add_scatter(x=[tr["entry_time"], tr["exit_time"]], y=[tr["entry"], tr["exit"]],
-                    mode="lines", line=dict(width=1.2, color=win_c, dash="dot"),
+                    mode="lines", line=dict(width=1, color=win_c, dash="dot"),
                     showlegend=False, hoverinfo="skip")
     fig.add_shape(type="line", x0=tr["entry_time"], x1=tr["exit_time"],
                   y0=tr["stop"], y1=tr["stop"],
-                  line=dict(width=1.5, color="#C62828", dash="dash"))
+                  line=dict(width=1.3, color="#C62828", dash="dash"))
     if pd.notna(tr.get("target")):
         fig.add_shape(type="line", x0=tr["entry_time"], x1=tr["exit_time"],
                       y0=tr["target"], y1=tr["target"],
-                      line=dict(width=1.5, color="#2E7D32", dash="dash"))
-    fig.update_layout(height=520, template="plotly_white",
-                      xaxis_rangeslider_visible=False, margin=dict(t=25, b=10),
-                      legend=dict(orientation="h", y=1.02, x=0))
+                      line=dict(width=1.3, color="#2E7D32", dash="dash"))
+    _clean_layout(fig, height=520)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -516,10 +546,17 @@ def _trade_browser(X, trades, ema_cols):
     c[3].metric("Exit", f"{tr['exit']:,.1f}")
     c[4].metric("R multiple", f"{tr['r_mult']:+.2f}R")
     c[5].metric("P&L", f"₹{tr['pnl']:,.0f}")
-    _trade_chart(V, tr, ema_cols)
-    st.caption("▲/▼ entry · ✕ exit · red dashed = initial stop · green dashed = target · "
-               "amber line = session VWAP · shaded = FVG zones · dashed h-lines = "
-               "PDH/PDL & CPR.")
+    # clean by default — heavy overlays are opt-in
+    oc = st.columns([1, 1, 1.4, 1, 3])
+    show = {
+        "ema": oc[0].checkbox("EMAs", value=True, key="adv_tb_ema"),
+        "vwap": oc[1].checkbox("VWAP", value=False, key="adv_tb_vwap"),
+        "levels": oc[2].checkbox("PDH/PDL · CPR", value=False, key="adv_tb_lvl"),
+        "fvg": oc[3].checkbox("FVG zones", value=False, key="adv_tb_fvg"),
+    }
+    _trade_chart(V, tr, ema_cols, show)
+    st.caption("▲/▼ entry · ✕ exit · red dashed = stop · green dashed = target. "
+               "Toggle indicators above to keep the chart clean.")
 
 
 def _window_chart(X, trades, ema_cols, d0, d1):
@@ -538,22 +575,12 @@ def _window_chart(X, trades, ema_cols, d0, d1):
         V = V.iloc[-4000:]
     x = V["open_time"]
     fig = go.Figure()
-    fig.add_candlestick(x=x, open=V["open"], high=V["high"], low=V["low"],
-                        close=V["close"], name="Price",
-                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
-    palette = ["#FB8C00", "#8E24AA", "#1E88E5"]
+    _clean_candles(fig, x, V)
+    palette = ["#2962FF", "#FF6D00", "#AB47BC"]
     for i, col in enumerate(ema_cols):
         if col in V:
             fig.add_scatter(x=x, y=V[col], mode="lines", name=col.replace("ema_", "EMA "),
-                            line=dict(width=1.2, color=palette[i % len(palette)]))
-    if "vwap" in V and V["vwap"].notna().any():
-        fig.add_scatter(x=x, y=V["vwap"], mode="lines", name="VWAP",
-                        line=dict(width=1.5, color="#FFB300"), connectgaps=False)
-    for col, nm in [("pdh", "PDH"), ("pdl", "PDL"),
-                    ("cpr_top", "CPR top"), ("cpr_bottom", "CPR bot")]:
-        if V[col].notna().any():
-            fig.add_scatter(x=x, y=V[col], mode="lines", name=nm, opacity=0.6,
-                            line=dict(width=1, dash="dash"), connectgaps=False)
+                            line=dict(width=1.1, color=palette[i % len(palette)]))
     tin = trades[(trades["date"].dt.date >= cd0) & (trades["date"].dt.date <= cd1)]
     for _, tr in tin.iterrows():
         long = tr["direction"] == "long"
@@ -566,11 +593,9 @@ def _window_chart(X, trades, ema_cols, d0, d1):
         fig.add_scatter(x=[tr["exit_time"]], y=[tr["exit"]], mode="markers",
                         marker=dict(symbol="x", size=9, color=win_c), showlegend=False,
                         hovertext=f"exit {tr['exit']} ({tr['outcome']})", hoverinfo="text")
-    fig.update_layout(height=520, template="plotly_white",
-                      xaxis_rangeslider_visible=False, margin=dict(t=25, b=10),
-                      legend=dict(orientation="h", y=1.02, x=0))
+    _clean_layout(fig, height=520)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"{len(tin)} trade(s) in window.")
+    st.caption(f"{len(tin)} trade(s) in window · ▲/▼ entries · ✕ exits.")
 
 
 def _trade_log(trades):

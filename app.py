@@ -353,47 +353,66 @@ EDGE_LOG_COLS = ["date", "dow", "side", "entry time", "exit time", "entry", "exi
                  "gap", "day kind", "first side"]
 
 
+# ── clean, TradingView-style chart primitives (shared by all trade browsers) ───
+CANDLE_UP, CANDLE_DN = "#089981", "#F23645"     # TradingView green / red
+
+
+def _clean_candles(fig, x, day_df):
+    fig.add_candlestick(
+        x=x, open=day_df["open"], high=day_df["high"], low=day_df["low"],
+        close=day_df["close"], name="Price", line=dict(width=1),
+        increasing=dict(line=dict(color=CANDLE_UP, width=1), fillcolor=CANDLE_UP),
+        decreasing=dict(line=dict(color=CANDLE_DN, width=1), fillcolor=CANDLE_DN))
+
+
+def _clean_layout(fig, height=480, title=None):
+    fig.update_layout(
+        height=height, template="plotly_white", xaxis_rangeslider_visible=False,
+        margin=dict(t=42 if title else 14, b=16, l=8, r=8),
+        plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified",
+        dragmode="pan", showlegend=False,
+        title=(dict(text=title, x=0, xanchor="left", font=dict(size=13)) if title else None),
+        xaxis=dict(showgrid=False, showline=True, linecolor="rgba(0,0,0,0.18)",
+                   ticks="outside", tickcolor="rgba(0,0,0,0.18)",
+                   rangebreaks=[dict(bounds=["sat", "mon"])]),
+        yaxis=dict(side="right", showgrid=True, gridcolor="rgba(0,0,0,0.05)",
+                   zeroline=False, showline=False))
+
+
 def _edge_day_chart(day_df, tr, open_t, end_t):
-    """One trade drawn on its day's minute chart: opening-range box, TP/SL lines,
-    entry/exit markers — neat and self-explanatory."""
+    """One trade drawn on its day's minute chart — clean candles, OR box, TP/SL."""
     day = pd.Timestamp(tr["date"])
     x = day_df["date"]
     fig = go.Figure()
-    fig.add_candlestick(x=x, open=day_df["open"], high=day_df["high"],
-                        low=day_df["low"], close=day_df["close"], name="Price",
-                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
-    # opening-range box (ORB/IB window)
+    _clean_candles(fig, x, day_df)
+    # opening-range box (ORB/IB window) — subtle
     fig.add_shape(type="rect",
                   x0=day + pd.Timedelta(minutes=open_t), x1=day + pd.Timedelta(minutes=end_t),
                   y0=tr["win_lo"], y1=tr["win_hi"],
-                  fillcolor="rgba(96,125,139,0.15)", line=dict(width=1, color="#607D8B"))
+                  fillcolor="rgba(96,125,139,0.10)", line=dict(width=1, color="#90A4AE"))
     x_entry = day + pd.Timedelta(minutes=int(tr["_entry_t"]))
     x_exit = day + pd.Timedelta(minutes=int(tr["_exit_t"]))
-    # target / stop levels, drawn from entry to exit
-    for px, color, nm in [(tr["target px"], "#2E7D32", "target"),
-                          (tr["stop px"], "#C62828", "stop")]:
+    for px, color in [(tr["target px"], "#2E7D32"), (tr["stop px"], "#C62828")]:
         fig.add_shape(type="line", x0=x_entry, x1=x_exit, y0=px, y1=px,
-                      line=dict(width=1.5, color=color, dash="dash"))
+                      line=dict(width=1.3, color=color, dash="dash"))
     long = tr["side"] == "long"
     win_c = "#2E7D32" if tr["win"] else "#C62828"
-    fig.add_scatter(x=[x_entry], y=[tr["entry"]], mode="markers+text",
+    fig.add_scatter(x=[x_entry], y=[tr["entry"]], mode="markers",
                     marker=dict(symbol="triangle-up" if long else "triangle-down",
-                                size=14, color="#2E7D32" if long else "#C62828",
+                                size=13, color="#2E7D32" if long else "#C62828",
                                 line=dict(width=1, color="white")),
-                    text=[f"ENTRY {tr['entry time']}"],
-                    textposition="bottom center" if long else "top center",
-                    textfont=dict(size=10), showlegend=False)
-    fig.add_scatter(x=[x_exit], y=[tr["exit"]], mode="markers+text",
-                    marker=dict(symbol="x", size=11, color=win_c),
-                    text=[f"EXIT {tr['exit time']} ({tr['outcome']})"],
-                    textposition="top center", textfont=dict(size=10), showlegend=False)
+                    showlegend=False, hovertext=f"entry {tr['entry time']} · {tr['entry']:.2f}",
+                    hoverinfo="text")
+    fig.add_scatter(x=[x_exit], y=[tr["exit"]], mode="markers",
+                    marker=dict(symbol="x", size=10, color=win_c), showlegend=False,
+                    hovertext=f"exit {tr['exit time']} · {tr['exit']:.2f} ({tr['outcome']})",
+                    hoverinfo="text")
     fig.add_scatter(x=[x_entry, x_exit], y=[tr["entry"], tr["exit"]], mode="lines",
-                    line=dict(width=1.2, color=win_c, dash="dot"),
+                    line=dict(width=1, color=win_c, dash="dot"),
                     showlegend=False, hoverinfo="skip")
-    fig.update_layout(height=480, template="plotly_white",
-                      xaxis_rangeslider_visible=False, margin=dict(t=30, b=10),
-                      title=f"{day:%a %d %b %Y} · {tr['side'].upper()} · "
-                            f"{tr['pnl']:+.1f} pts ({tr['r_mult']:+.2f}R)")
+    _clean_layout(fig, height=480,
+                  title=f"{day:%a %d %b %Y} · {tr['side'].upper()} · "
+                        f"{tr['pnl']:+.1f} pts ({tr['r_mult']:+.2f}R)")
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1196,44 +1215,41 @@ def _dw_day_chart(day_df, tr, open_t, ib_min):
     day = pd.Timestamp(tr["date"])
     x = day_df["date"]
     fig = go.Figure()
-    fig.add_candlestick(x=x, open=day_df["open"], high=day_df["high"],
-                        low=day_df["low"], close=day_df["close"], name="Price",
-                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
-    # IB box
+    _clean_candles(fig, x, day_df)
+    # IB box — subtle
     fig.add_shape(type="rect",
                   x0=day + pd.Timedelta(minutes=open_t),
                   x1=day + pd.Timedelta(minutes=open_t + ib_min - 1),
                   y0=tr["ib_low"], y1=tr["ib_high"],
-                  fillcolor="rgba(96,125,139,0.15)", line=dict(width=1, color="#607D8B"))
+                  fillcolor="rgba(96,125,139,0.10)", line=dict(width=1, color="#90A4AE"))
     x_entry = day + pd.Timedelta(minutes=int(tr["entry_t"]))
     x_exit = day + pd.Timedelta(minutes=int(tr["exit_t"]))
     # levels drawn over the trade's lifetime
     for px, color, dash in [(tr["stop_px"], "#C62828", "dash"),
                             (tr["tp1_px"], "#66BB6A", "dash"),
                             (tr["tp2_px"], "#2E7D32", "dash"),
-                            (tr["entry"], "#607D8B", "dot")]:
+                            (tr["entry"], "#90A4AE", "dot")]:
         fig.add_shape(type="line", x0=x_entry, x1=x_exit, y0=px, y1=px,
-                      line=dict(width=1.4, color=color, dash=dash))
+                      line=dict(width=1.3, color=color, dash=dash))
     long = tr["direction"] == "long"
     win_c = "#2E7D32" if tr["win"] else "#C62828"
-    fig.add_scatter(x=[x_entry], y=[tr["entry"]], mode="markers+text",
+    fig.add_scatter(x=[x_entry], y=[tr["entry"]], mode="markers",
                     marker=dict(symbol="triangle-up" if long else "triangle-down",
-                                size=14, color="#2E7D32" if long else "#C62828",
+                                size=13, color="#2E7D32" if long else "#C62828",
                                 line=dict(width=1, color="white")),
-                    text=[f"ENTRY {hhmm(tr['entry_t'])}"],
-                    textposition="bottom center" if long else "top center",
-                    textfont=dict(size=10), showlegend=False)
-    fig.add_scatter(x=[x_exit], y=[tr["exit_px"]], mode="markers+text",
-                    marker=dict(symbol="x", size=11, color=win_c),
-                    text=[f"EXIT {hhmm(tr['exit_t'])} ({tr['outcome']})"],
-                    textposition="top center", textfont=dict(size=10), showlegend=False)
+                    showlegend=False,
+                    hovertext=f"entry {hhmm(tr['entry_t'])} · {tr['entry']:.2f}",
+                    hoverinfo="text")
+    fig.add_scatter(x=[x_exit], y=[tr["exit_px"]], mode="markers",
+                    marker=dict(symbol="x", size=10, color=win_c), showlegend=False,
+                    hovertext=f"exit {hhmm(tr['exit_t'])} · {tr['exit_px']:.2f} "
+                              f"({tr['outcome']})", hoverinfo="text")
     fig.add_scatter(x=[x_entry, x_exit], y=[tr["entry"], tr["exit_px"]], mode="lines",
-                    line=dict(width=1.2, color=win_c, dash="dot"),
+                    line=dict(width=1, color=win_c, dash="dot"),
                     showlegend=False, hoverinfo="skip")
-    fig.update_layout(height=480, template="plotly_white",
-                      xaxis_rangeslider_visible=False, margin=dict(t=30, b=10),
-                      title=f"{day:%a %d %b %Y} · {tr['direction'].upper()} · "
-                            f"{tr['pnl']:+.1f} pts ({tr['r_mult']:+.2f}R)")
+    _clean_layout(fig, height=480,
+                  title=f"{day:%a %d %b %Y} · {tr['direction'].upper()} · "
+                        f"{tr['pnl']:+.1f} pts ({tr['r_mult']:+.2f}R)")
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1373,16 +1389,14 @@ def _live_sample_day_chart(day_df, row, open_t, ib_min, close_t):
     day = pd.Timestamp(row["date"])
     x = day_df["date"]
     fig = go.Figure()
-    fig.add_candlestick(x=x, open=day_df["open"], high=day_df["high"],
-                        low=day_df["low"], close=day_df["close"], name="Price",
-                        increasing_line_color="#26A69A", decreasing_line_color="#EF5350")
+    _clean_candles(fig, x, day_df)
     # IB window box
     ib_x0 = day + pd.Timedelta(minutes=open_t)
     ib_x1 = day + pd.Timedelta(minutes=open_t + ib_min - 1)
     if pd.notna(row.get("ib_high")) and pd.notna(row.get("ib_low")):
         fig.add_shape(type="rect", x0=ib_x0, x1=ib_x1,
                       y0=row["ib_low"], y1=row["ib_high"],
-                      fillcolor="rgba(96,125,139,0.16)", line=dict(width=1, color="#607D8B"))
+                      fillcolor="rgba(96,125,139,0.10)", line=dict(width=1, color="#90A4AE"))
         fig.add_annotation(x=ib_x0, y=row["ib_high"], text="IB", showarrow=False,
                            yshift=8, font=dict(size=10, color="#607D8B"))
         # IB high/low extended across the rest of the session
@@ -1390,23 +1404,19 @@ def _live_sample_day_chart(day_df, row, open_t, ib_min, close_t):
                       y1=row["ib_high"], line=dict(width=1, dash="dot", color="#2E7D32"))
         fig.add_shape(type="line", x0=ib_x1, x1=x.iloc[-1], y0=row["ib_low"],
                       y1=row["ib_low"], line=dict(width=1, dash="dot", color="#C62828"))
-    # PDH / PDL
-    for lvl, nm, col in [(row.get("pdh"), "PDH", "#6A1B9A"),
-                         (row.get("pdl"), "PDL", "#6A1B9A")]:
+    # PDH / PDL — subtle
+    for lvl, nm in [(row.get("pdh"), "PDH"), (row.get("pdl"), "PDL")]:
         if pd.notna(lvl):
-            fig.add_hline(y=float(lvl), line=dict(width=1, dash="dash", color=col),
-                          annotation_text=nm, annotation_font_size=10)
+            fig.add_hline(y=float(lvl), line=dict(width=1, dash="dash", color="#6A1B9A"),
+                          annotation_text=nm, annotation_font_size=9)
     first = (row.get("ib_first_side") or "?").upper()
     brk = (row.get("ib_break_first") or "none")
     ue, de = row.get("ib_up_ext"), row.get("ib_dn_ext")
     ext_txt = (f"up {ue:.2f}×R" if pd.notna(ue) else "—") + " / " + \
               (f"dn {de:.2f}×R" if pd.notna(de) else "—")
-    fig.update_layout(
-        height=460, template="plotly_white", xaxis_rangeslider_visible=False,
-        margin=dict(t=46, b=10),
-        title=dict(text=f"{day:%a %d %b %Y}  ·  {row.get('gap_type','')}  ·  "
-                        f"{first} formed first  ·  broke {brk} first  ·  ext {ext_txt}",
-                   x=0, xanchor="left", font=dict(size=14)))
+    _clean_layout(fig, height=460,
+                  title=f"{day:%a %d %b %Y}  ·  {row.get('gap_type','')}  ·  "
+                        f"{first} formed first  ·  broke {brk} first  ·  ext {ext_txt}")
     st.plotly_chart(fig, use_container_width=True)
 
 
