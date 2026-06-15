@@ -1718,8 +1718,9 @@ def live_mode():
         mpath = live_paths[instrument]
         mtime = os.path.getmtime(mpath)
         open_t = data_store.session_open(instrument, get_open_t(mpath, mtime))
-        ib_min = int(st.number_input("IB duration (min)", 15, 240, 60, 15,
-                                     key="live_ibmin"))
+        ib_min = int(st.number_input("IB duration (min)", 10, 240, 60, 10,
+                                     key="live_ibmin",
+                                     help="In 10-min steps (e.g. 40, 50, 60)."))
         lb_label = st.selectbox("Probability lookback", list(LOOKBACKS.keys()),
                                 index=2, key="live_lookback",
                                 help="Only days within this window feed the live "
