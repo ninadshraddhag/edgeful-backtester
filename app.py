@@ -25,6 +25,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import daywise
+import ib50
 import prob_app
 import build_facts
 import data_store
@@ -1209,13 +1210,27 @@ def daywise_mode():
                 st.rerun()
 
 
-def _dw_day_chart(day_df, tr, open_t, ib_min):
+@st.cache_data(show_spinner=False, max_entries=2)
+def _min_session_vwap(mpath, mtime):
+    """Session VWAP aligned to the full minute frame — the SAME series the
+    day-wise engine uses for its VWAP-close exit, so the plotted line matches
+    exactly where the exit was evaluated."""
+    import indicators as ind
+    mdf = load_min(mpath, mtime)
+    return ind.session_vwap(mdf).to_numpy()
+
+
+def _dw_day_chart(day_df, tr, open_t, ib_min, vwap=None):
     """One day-wise trade on its day's minute chart: IB box, entry/stop/TP1/TP2
-    levels and entry/exit markers."""
+    levels and entry/exit markers. `vwap` (optional) overlays session VWAP."""
     day = pd.Timestamp(tr["date"])
     x = day_df["date"]
     fig = go.Figure()
     _clean_candles(fig, x, day_df)
+    if vwap is not None:
+        fig.add_scatter(x=x, y=vwap, mode="lines", name="VWAP",
+                        line=dict(width=1.4, color="#FFB300"),
+                        hoverinfo="skip", showlegend=False)
     # IB box — subtle
     fig.add_shape(type="rect",
                   x0=day + pd.Timedelta(minutes=open_t),
@@ -1266,16 +1281,23 @@ def _dw_trade_browser(res):
     sel = st.selectbox("Trade", range(len(t_)), format_func=lambda i: labels[i],
                        key="dw_tb")
     tr = t_.iloc[sel]
+    show_vwap = st.checkbox("VWAP", value=True, key="dw_tb_vwap",
+                            help="Session VWAP — the line the day-wise VWAP-close exit "
+                                 "is measured against.")
     mdf = load_min(res["mpath"], res["mtime"])
-    dd = mdf[(mdf["date_only"] == pd.Timestamp(tr["date"]).date())
-             & (mdf["t_min"] >= res["open_t"]) & (mdf["t_min"] <= res["close_t"])]
+    mask = ((mdf["date_only"] == pd.Timestamp(tr["date"]).date())
+            & (mdf["t_min"] >= res["open_t"]) & (mdf["t_min"] <= res["close_t"]))
+    dd = mdf[mask]
     if dd.empty:
         st.info("No minute data for this trade's day.")
         return
-    _dw_day_chart(dd, tr, res["open_t"], res["ib_min"])
+    vwap = None
+    if show_vwap:
+        vwap = _min_session_vwap(res["mpath"], res["mtime"])[mask.to_numpy()]
+    _dw_day_chart(dd, tr, res["open_t"], res["ib_min"], vwap=vwap)
     st.caption("Shaded box = IB window · grey dotted = entry level · red dashed = stop · "
                "light green = TP1 (half exits, stop → breakeven) · dark green = TP2 · "
-               "▲/▼ entry · ✕ final exit.")
+               "amber line = session VWAP · ▲/▼ entry · ✕ final exit.")
 
 
 def _dw_show_results(res):
@@ -1702,6 +1724,291 @@ def _live_render(instrument, feat, probs, open_t):
         st.caption(f"PDF report unavailable: {e}")
 
 
+# ═══════════════════════ IB50 — IB Retracement strategy (Pine port) ═══════════
+
+@st.cache_data(show_spinner=False)
+def prep_ib50(instrument, mpath, mtime, open_t, close_t, ib_min):
+    mdf = load_min(mpath, mtime)
+    return ib50.prep_days(mdf, open_t, close_t, ib_min)
+
+
+def _session_vwap_day(dd):
+    """Session VWAP for one day's session slice (anchored at its first bar) —
+    the same formula ib50.prep_days uses, for the trade-browser overlay."""
+    src = (dd["high"] + dd["low"] + dd["close"]) / 3.0
+    if "volume" in dd.columns:
+        vol = pd.to_numeric(dd["volume"], errors="coerce").fillna(0.0)
+        if vol.sum() > 0:
+            return ((src * vol).cumsum() / vol.cumsum().replace(0.0, np.nan)).to_numpy()
+    return src.expanding().mean().to_numpy()
+
+
+def _ib50_day_chart(dd, tr, open_t, ib_min):
+    """Clean candlestick of one IB50 trade: IB box, VWAP, entry/stop/target."""
+    day = pd.Timestamp(tr["date"])
+    x = dd["date"]
+    fig = go.Figure()
+    _clean_candles(fig, x, dd)
+    fig.add_scatter(x=x, y=_session_vwap_day(dd), mode="lines", name="VWAP",
+                    line=dict(width=1.4, color="#FFB300"), hoverinfo="skip",
+                    showlegend=False)
+    # IB box
+    fig.add_shape(type="rect",
+                  x0=day + pd.Timedelta(minutes=open_t),
+                  x1=day + pd.Timedelta(minutes=open_t + ib_min - 1),
+                  y0=tr["ib_low"], y1=tr["ib_high"],
+                  fillcolor="rgba(96,125,139,0.10)", line=dict(width=1, color="#90A4AE"))
+    x_e = day + pd.Timedelta(minutes=int(tr["entry_t"]))
+    x_x = day + pd.Timedelta(minutes=int(tr["exit_t"]))
+    for px, color, dash in [(tr["stop"], "#C62828", "dash"),
+                            (tr["target"], "#2E7D32", "dash"),
+                            (tr["entry"], "#90A4AE", "dot")]:
+        fig.add_shape(type="line", x0=x_e, x1=x_x, y0=px, y1=px,
+                      line=dict(width=1.3, color=color, dash=dash))
+    long = tr["direction"] == "long"
+    win_c = "#2E7D32" if tr["win"] else "#C62828"
+    fig.add_scatter(x=[x_e], y=[tr["entry"]], mode="markers",
+                    marker=dict(symbol="triangle-up" if long else "triangle-down",
+                                size=13, color="#2E7D32" if long else "#C62828",
+                                line=dict(width=1, color="white")), showlegend=False,
+                    hovertext=f"entry {hhmm(tr['entry_t'])} · {tr['entry']:.2f}",
+                    hoverinfo="text")
+    fig.add_scatter(x=[x_x], y=[tr["exit"]], mode="markers",
+                    marker=dict(symbol="x", size=10, color=win_c), showlegend=False,
+                    hovertext=f"exit {hhmm(tr['exit_t'])} · {tr['exit']:.2f} "
+                              f"({tr['outcome']})", hoverinfo="text")
+    fig.add_scatter(x=[x_e, x_x], y=[tr["entry"], tr["exit"]], mode="lines",
+                    line=dict(width=1, color=win_c, dash="dot"),
+                    showlegend=False, hoverinfo="skip")
+    _clean_layout(fig, height=480,
+                  title=f"{day:%a %d %b %Y} · {tr['direction'].upper()} · "
+                        f"{tr['outcome']} · {tr['r']:+.2f}R · ${tr['pnl']:+,.0f}")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _ib50_trade_browser(trades, mpath, mtime, open_t, close_t, ib_min):
+    t_ = trades.reset_index(drop=True)
+    labels = [f"#{i+1} · {r['date']:%d %b %Y} {hhmm(r['entry_t'])} · "
+              f"{r['direction'].upper()} · {r['outcome']} · {r['r']:+.2f}R "
+              f"(${r['pnl']:+,.0f})" for i, r in t_.iterrows()]
+    sel = st.selectbox("Trade", range(len(t_)), format_func=lambda i: labels[i],
+                       key="ib50_tb")
+    tr = t_.iloc[sel]
+    mdf = load_min(mpath, mtime)
+    dd = mdf[(mdf["date_only"] == pd.Timestamp(tr["date"]).date())
+             & (mdf["t_min"] >= open_t) & (mdf["t_min"] <= close_t)]
+    if dd.empty:
+        st.info("No minute data for this trade's day.")
+        return
+    _ib50_day_chart(dd, tr, open_t, ib_min)
+    st.caption("Shaded box = IB · amber = session VWAP · grey dotted = entry · "
+               "red dashed = stop · green dashed = target · ▲/▼ entry · ✕ exit.")
+
+
+IB50_LOG_COLS = ["date", "dow", "direction", "entry time", "exit time", "entry",
+                 "stop", "target", "exit", "qty", "r", "pnl", "outcome"]
+
+
+def ib50_mode():
+    st.caption("**IB50 — IB Retracement strategy** (port of the TradingView Pine "
+               "indicator). Trades retracements into the Initial Balance with "
+               "formation / IB-close / VWAP direction filters, an optional breach "
+               "gate, %-of-range entry/stop/target, $-risk sizing and a session-VWAP "
+               "exit. Same optimizer + trade browser + log as the other modes.")
+    with st.sidebar:
+        instrument, mpath, mtime, open_t, close_t, ib_min, (d0, d1) = data_sidebar("ib50")
+
+    with st.spinner(f"Indexing {instrument} (first run cached)…"):
+        prep_all = prep_ib50(instrument, mpath, mtime, open_t, close_t, ib_min)
+    prep = [r for r in prep_all if d0 <= r["date"].date() <= d1]
+    if not prep:
+        st.warning("No trading days in the selected date range.")
+        st.stop()
+
+    # ── direction filters ─────────────────────────────────────────────────────
+    st.subheader("Direction filters")
+    d = st.columns([1, 1, 1, 1.3])
+    logic = d[0].radio("Combine", ["AND", "OR"], horizontal=True, key="ib50_logic",
+                       help="AND = every enabled filter must agree · OR = any one.")
+    use_form = d[1].checkbox("Formation order", value=True, key="ib50_form",
+                             help="Low formed first → bull · high first → bear.")
+    use_close = d[2].checkbox("IB close location", value=True, key="ib50_close")
+    close_pct = d[3].selectbox("Close level %", [50.0, 75.0], key="ib50_closepct",
+                               help="Bull if IB close > this %; bear mirrors below "
+                                    "(100−%). 75 leaves a neutral band.")
+    use_vwap = st.checkbox("VWAP (price vs session VWAP) — also the exit",
+                           value=True, key="ib50_vwap",
+                           help="Direction vote AND exit: long exits on a close below "
+                                "VWAP, short on a close above.")
+
+    # ── breach gate ───────────────────────────────────────────────────────────
+    with st.expander("Breach gate (optional)"):
+        b = st.columns(3)
+        use_breach = b[0].checkbox("Use breach gate", value=False, key="ib50_ub")
+        breach_mode = b[1].selectbox("Mode", ["Require Not-Breached", "Require Breached"],
+                                     key="ib50_bm",
+                                     help="Not-Breached = pullback from inside · "
+                                          "Breached = breakout-then-retrace.")
+        breach_scope = b[2].selectbox("Scope", ["Directional", "EitherSide"],
+                                      key="ib50_bs",
+                                      help="Directional = bull watches IB high / bear "
+                                           "watches IB low.")
+
+    # ── entry / stop / target + risk ──────────────────────────────────────────
+    st.subheader("Entry / Stop / Target  ·  Risk")
+    e = st.columns(3)
+    entry_pct = e[0].number_input("Entry % (retrace from extreme)", 0.0, 100.0, 25.0, 5.0,
+                                  key="ib50_e")
+    sl_pct = e[1].number_input("Stop % (retrace from extreme)", 0.0, 100.0, 75.0, 5.0,
+                               key="ib50_s")
+    target_pct = e[2].number_input("Target % (extension beyond extreme)", 0.0, 400.0,
+                                    100.0, 5.0, key="ib50_t",
+                                    help="0 = the IB extreme · 100 = one full IB range "
+                                         "beyond it.")
+    r = st.columns(3)
+    risk_usd = r[0].number_input("Risk per trade ($)", 1.0, 1_000_000.0, 500.0, 50.0,
+                                 key="ib50_risk")
+    point_value = r[1].number_input("Point value ($/pt)", 0.01, 1000.0, 20.0, 1.0,
+                                    key="ib50_pv",
+                                    help="NQ E-mini = 20 (MNQ = 2). Only affects the "
+                                         "contracts/qty shown; $ and R are unaffected.")
+    allow_reentry = r[2].checkbox("Allow re-entry same session", value=False,
+                                  key="ib50_re")
+
+    # ── time filters ──────────────────────────────────────────────────────────
+    with st.expander("Time filters (optional)"):
+        tcol = st.columns(2)
+        use_ew = tcol[0].checkbox("Limit entries to a window", value=False, key="ib50_uew")
+        ew = tcol[0].columns(2)
+        ews = ew[0].time_input("From", value=dtime(9, 30), key="ib50_ews",
+                               disabled=not use_ew)
+        ewe = ew[1].time_input("To", value=dtime(15, 0), key="ib50_ewe",
+                               disabled=not use_ew)
+        use_xt = tcol[1].checkbox("Force-exit at a set time", value=False, key="ib50_uxt")
+        xt = tcol[1].time_input("Exit time", value=dtime(15, 45), key="ib50_xt",
+                                disabled=not use_xt)
+
+    n_enabled = use_form + use_close + use_vwap
+    if n_enabled == 0:
+        st.warning("Enable at least one direction filter — with none, the strategy "
+                   "takes no trades (matches the Pine engine).")
+
+    exit_t = xt.hour * 60 + xt.minute
+    eff_min = min(close_t, exit_t) if use_xt else close_t
+    cfg = dict(
+        ib_min=ib_min, open_t=open_t, close_t=close_t,
+        use_formation=use_form, use_closeloc=use_close, close_loc_pct=float(close_pct),
+        use_vwap=use_vwap, logic=logic,
+        use_breach=use_breach, breach_mode=breach_mode, breach_scope=breach_scope,
+        entry_pct=float(entry_pct), sl_pct=float(sl_pct), target_pct=float(target_pct),
+        risk_usd=float(risk_usd), point_value=float(point_value),
+        use_entry_window=use_ew, entry_start_t=ews.hour * 60 + ews.minute,
+        entry_end_t=ewe.hour * 60 + ewe.minute,
+        use_exit_time=use_xt, exit_t=exit_t, eff_min=eff_min,
+        allow_reentry=allow_reentry,
+    )
+
+    st.divider()
+    tab1, tab2 = st.tabs(["🎯 Strategy", "🔬 Optimizer (entry/stop/target sweep)"])
+
+    # ── strategy tab ──────────────────────────────────────────────────────────
+    with tab1:
+        if sl_pct <= entry_pct:
+            st.error("Stop % must be greater than Entry % (the stop sits deeper into "
+                     "the range than the entry).")
+        trades = ib50.run(prep, cfg)
+        m = ib50.metrics(trades, len(prep))
+        if m is None:
+            st.warning("No trades for this configuration. Loosen filters / widen the "
+                       "entry depth.")
+        else:
+            k = st.columns(6)
+            k[0].metric("Days", f"{m['n_days']:,}")
+            k[1].metric("Trades", f"{m['trades']:,}")
+            k[2].metric("Win rate", pct(m["win_rate"]))
+            k[3].metric("Net P&L", f"${m['net_pnl']:,.0f}")
+            k[4].metric("Net R", f"{m['net_r']:+.1f}R")
+            k[5].metric("Profit Factor", f"{m['profit_factor']:.2f}"
+                        if np.isfinite(m["profit_factor"]) else "∞")
+            k2 = st.columns(6)
+            k2[0].metric("Win / Loss", f"{m['wins']} / {m['losses']}")
+            k2[1].metric("Expectancy", f"${m['expectancy']:,.0f}/trade")
+            k2[2].metric("Avg R", f"{m['avg_r']:+.2f}R")
+            k2[3].metric("Max DD", f"${m['max_dd']:,.0f}", f"{m['max_dd_r']:.1f}R",
+                         delta_color="off")
+            k2[4].metric("Avg Win", f"${m['avg_win']:,.0f}")
+            k2[5].metric("Sharpe", f"{m['sharpe']:.2f}" if np.isfinite(m["sharpe"]) else "—")
+
+            eq = ib50.equity_curve(trades, prep)
+            fig = go.Figure()
+            fig.add_scatter(x=eq["date"], y=eq["equity"], mode="lines",
+                            line=dict(color="#2196F3", width=2), fill="tozeroy",
+                            fillcolor="rgba(33,150,243,0.08)")
+            fig.update_layout(title="Equity curve ($ cumulative)", height=320,
+                              template="plotly_white", margin=dict(t=40, b=10),
+                              yaxis_title="$")
+            st.plotly_chart(fig, use_container_width=True)
+
+            log = trades.copy()
+            log["entry time"] = log["entry_t"].map(hhmm)
+            log["exit time"] = log["exit_t"].map(hhmm)
+            with st.expander(f"📋 Trade log ({len(log):,}) — entry & exit times"):
+                st.dataframe(log[IB50_LOG_COLS].sort_values("date", ascending=False),
+                             use_container_width=True, hide_index=True, height=380)
+                st.download_button("⬇ Download trades (CSV)",
+                                   log[IB50_LOG_COLS].to_csv(index=False).encode(),
+                                   file_name=f"ib50_{instrument.replace(' ', '_')}.csv",
+                                   mime="text/csv")
+            with st.expander("🔍 Trade browser — any trade on its day's chart"):
+                _ib50_trade_browser(trades, mpath, mtime, open_t, close_t, ib_min)
+
+    # ── optimizer tab ─────────────────────────────────────────────────────────
+    with tab2:
+        st.markdown("Sweep **entry % × stop % × target %** over the current filter / "
+                    "breach / time configuration, ranked by your metric.")
+        o = st.columns(4)
+        rank = o[0].selectbox("Rank by", ["net_r", "net", "win_rate", "pf", "expectancy"],
+                              format_func=lambda x: {"net_r": "Net R", "net": "Net $",
+                                                     "win_rate": "Win %", "pf": "Profit factor",
+                                                     "expectancy": "Expectancy"}[x],
+                              key="ib50_rank")
+        min_tr = int(o[1].number_input("Min trades", 10, 5000, 50, 10, key="ib50_min"))
+        eg = o[2].multiselect("Entry % grid", [0, 10, 25, 50, 75],
+                              default=[0, 10, 25, 50], key="ib50_eg")
+        tg = o[3].multiselect("Target % grid", [25, 50, 75, 100, 150, 200],
+                              default=[50, 75, 100, 150], key="ib50_tg")
+        sg = st.multiselect("Stop % grid", [25, 50, 75, 100],
+                            default=[50, 75, 100], key="ib50_sg")
+
+        if st.button("🔎 Run optimization", type="primary", key="ib50_opt_run"):
+            if not (eg and sg and tg):
+                st.warning("Pick at least one value in each grid.")
+            else:
+                grid = dict(entry=sorted(eg), stop=sorted(sg), target=sorted(tg))
+                prog = st.progress(0.0, text="Sweeping…")
+
+                def cb(done, total):
+                    if done % 3 == 0 or done == total:
+                        prog.progress(done / total, text=f"{done}/{total} configs…")
+
+                res = ib50.optimize(prep, cfg, grid, min_tr, rank, progress=cb)
+                prog.empty()
+                st.session_state["ib50_opt_res"] = res
+
+        res = st.session_state.get("ib50_opt_res")
+        if res is not None:
+            if res.empty:
+                st.warning("No configuration met the minimum-trades threshold.")
+            else:
+                st.success(f"{len(res):,} configurations · top 40 shown")
+                st.dataframe(res.head(40), use_container_width=True, hide_index=True)
+                st.download_button("⬇ Download results", res.to_csv(index=False).encode(),
+                                   file_name=f"ib50_optimizer_{instrument.replace(' ', '_')}.csv",
+                                   mime="text/csv")
+                st.caption("Filters, breach gate and time windows stay as set on the "
+                           "Strategy tab — only entry/stop/target vary here.")
+
+
 def live_mode():
     st.title("📡 Live Market Statistics")
     st.caption("Classifies the day as it forms and shows live conditional probabilities "
@@ -1891,7 +2198,7 @@ def main():
 
     mode = st.sidebar.radio(
         "Mode",
-        ["Edge Backtester", "Day-wise IB Retracement", "Advanced Backtesting",
+        ["Edge Backtester", "Day-wise IB Retracement", "IB50", "Advanced Backtesting",
          "Probabilities", "Live Market Statistics"],
         key="app_mode")
     st.sidebar.divider()
@@ -1909,6 +2216,9 @@ def main():
     st.title("📈 Backtester Pro")
     if mode == "Day-wise IB Retracement":
         daywise_mode()
+        return
+    if mode == "IB50":
+        ib50_mode()
         return
 
     st.caption("Trades the probability edges · targets & stops in × opening-range · "
