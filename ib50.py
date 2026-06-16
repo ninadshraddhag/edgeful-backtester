@@ -75,16 +75,24 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int) -> l
         else:
             vwap = src.expanding().mean()
         post_mask = sess["t_min"] > ib_end
+        ph_arr = post["high"].to_numpy(float)
+        pl_arr = post["low"].to_numpy(float)
+        # cumulative breach state (config-independent → precompute once): True at
+        # bar i once the IB high/low has been pierced by bar i (inclusive)
+        hb = (np.maximum.accumulate(ph_arr > H).astype(bool) if len(ph_arr)
+              else np.zeros(0, dtype=bool))
+        lb = (np.maximum.accumulate(pl_arr < L).astype(bool) if len(pl_arr)
+              else np.zeros(0, dtype=bool))
 
         out.append({
             "date": pd.Timestamp(day), "dow": dow,
             "ib_high": H, "ib_low": L, "ib_range": rng, "ib_close": ib_close,
             "first_side": int(first_side), "day_open": float(sess.iloc[0]["open"]),
             "pt": post["t_min"].to_numpy(float),
-            "ph": post["high"].to_numpy(float),
-            "pl": post["low"].to_numpy(float),
+            "ph": ph_arr, "pl": pl_arr,
             "pc": post["close"].to_numpy(float),
             "pv": vwap[post_mask].to_numpy(float),
+            "hb": hb, "lb": lb,
         })
     return out
 
@@ -153,8 +161,8 @@ def sim_day(rec, cfg) -> list:
     risk, pvval = cfg["risk_usd"], cfg.get("point_value", 1.0)
     use_vwap, logic = cfg["use_vwap"], cfg["logic"]
     reentry = cfg["allow_reentry"]
+    hb, lb = rec["hb"], rec["lb"]                  # precomputed cumulative breach state
 
-    high_br = low_br = False
     traded = False
     pos = 0
     e_px = s_px = t_px = qty = np.nan
@@ -163,10 +171,6 @@ def sim_day(rec, cfg) -> list:
 
     for i in range(n):
         hi, lo, cl, vw, tm = ph[i], pl[i], pc[i], pv[i], int(pt[i])
-        if hi > ib_high:
-            high_br = True
-        if lo < ib_low:
-            low_br = True
 
         # ── entry (only when flat) ───────────────────────────────────────────
         if pos == 0 and (reentry or not traded) and tm < eff_min and \
@@ -174,14 +178,14 @@ def sim_day(rec, cfg) -> list:
             bias = _bias_at(f_side, c_vote, n_enabled, use_vwap, logic, cl, vw)
             if bias == 1:
                 eP, sP, tP = ib_high - entry * rng, ib_high - sl * rng, ib_high + target * rng
-                if sP < eP and tP > eP and _breach_ok(True, cfg, high_br, low_br) \
+                if sP < eP and tP > eP and _breach_ok(True, cfg, hb[i], lb[i]) \
                         and lo <= eP <= hi:
                     pos, e_px, s_px, t_px, e_i = 1, eP, sP, tP, i
                     qty = risk / (max(abs(eP - sP), 1e-9) * pvval)
                     traded = True
             elif bias == -1:
                 eP, sP, tP = ib_low + entry * rng, ib_low + sl * rng, ib_low - target * rng
-                if sP > eP and tP < eP and _breach_ok(False, cfg, high_br, low_br) \
+                if sP > eP and tP < eP and _breach_ok(False, cfg, hb[i], lb[i]) \
                         and lo <= eP <= hi:
                     pos, e_px, s_px, t_px, e_i = -1, eP, sP, tP, i
                     qty = risk / (max(abs(eP - sP), 1e-9) * pvval)
@@ -294,24 +298,61 @@ def equity_curve(trades: pd.DataFrame, prepped: list) -> pd.DataFrame:
 OPT_GRID = dict(entry=[0, 10, 25, 50], stop=[50, 75, 100], target=[50, 75, 100, 150])
 
 
+def filter_configs(cfg: dict, sweep_form: bool, sweep_close: bool,
+                   sweep_vwap: bool, sweep_logic: bool) -> list:
+    """
+    Deduplicated list of (use_formation, use_closeloc, use_vwap, logic) tuples to
+    sweep. Combos with zero filters (no trades) are dropped; AND/OR is collapsed
+    when fewer than two filters are enabled (logic is then irrelevant), so no two
+    runs are effectively identical.
+    """
+    form_opts = [True, False] if sweep_form else [cfg["use_formation"]]
+    close_opts = [True, False] if sweep_close else [cfg["use_closeloc"]]
+    vwap_opts = [True, False] if sweep_vwap else [cfg["use_vwap"]]
+    logic_opts = ["AND", "OR"] if sweep_logic else [cfg["logic"]]
+    seen, out = set(), []
+    for f in form_opts:
+        for cl in close_opts:
+            for vw in vwap_opts:
+                if not (f or cl or vw):
+                    continue
+                for lg in logic_opts:
+                    eff_logic = lg if (f + cl + vw) >= 2 else "AND"
+                    key = (f, cl, vw, eff_logic)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(key)
+    return out
+
+
 def optimize(prepped: list, cfg: dict, grid: dict, min_trades: int, rank_by: str,
+             sweep_form=False, sweep_close=False, sweep_vwap=False, sweep_logic=False,
              progress=None) -> pd.DataFrame:
     """
-    Sweep entry% × stop% × target% over the fixed filter/breach configuration.
-    Ranks by the chosen metric with a min-trades guard. Entry stack (filters,
-    breach, times) stays as configured — only the level %s vary.
+    Sweep entry% × stop% × target%  AND (optionally) the direction filters
+    (formation / close-location / VWAP / AND-OR). Breach gate, close-level % and
+    time windows stay as configured. Ranked by the chosen metric, min-trades
+    guard. Each result row is a fully-specified, tradeable configuration.
     """
-    combos = [(e, s, t) for e in grid["entry"] for s in grid["stop"]
-              for t in grid["target"] if s > e]
+    fconfigs = filter_configs(cfg, sweep_form, sweep_close, sweep_vwap, sweep_logic)
+    geom = [(e, s, t) for e in grid["entry"] for s in grid["stop"]
+            for t in grid["target"] if s > e]
+    combos = [(fc, g) for fc in fconfigs for g in geom]
     n_days = len(prepped)
     rows = []
-    for k, (e, s, t) in enumerate(combos):
+    for k, ((f, cl, vw, lg), (e, s, t)) in enumerate(combos):
         c = copy.deepcopy(cfg)
+        c["use_formation"], c["use_closeloc"], c["use_vwap"], c["logic"] = f, cl, vw, lg
         c["entry_pct"], c["sl_pct"], c["target_pct"] = e, s, t
         trades = run(prepped, c)
         if len(trades) >= min_trades:
             m = metrics(trades, n_days)
             rows.append({
+                "formation": "on" if f else "off",
+                "close-loc": "on" if cl else "off",
+                "vwap": "on" if vw else "off",
+                "logic": lg if (f + cl + vw) >= 2 else "—",
                 "entry %": e, "stop %": s, "target %": t,
                 "trades": m["trades"],
                 "win %": round(m["win_rate"] * 100, 1),

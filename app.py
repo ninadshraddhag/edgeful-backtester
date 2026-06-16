@@ -1964,8 +1964,10 @@ def ib50_mode():
 
     # ── optimizer tab ─────────────────────────────────────────────────────────
     with tab2:
-        st.markdown("Sweep **entry % × stop % × target %** over the current filter / "
-                    "breach / time configuration, ranked by your metric.")
+        st.markdown("Sweep the trade **geometry** (entry % × stop % × target %) and, "
+                    "optionally, the **direction filters** themselves — so you can see "
+                    "whether formation / close-location / VWAP / AND-OR actually earn "
+                    "their keep.")
         o = st.columns(4)
         rank = o[0].selectbox("Rank by", ["net_r", "net", "win_rate", "pf", "expectancy"],
                               format_func=lambda x: {"net_r": "Net R", "net": "Net $",
@@ -1980,6 +1982,26 @@ def ib50_mode():
         sg = st.multiselect("Stop % grid", [25, 50, 75, 100],
                             default=[50, 75, 100], key="ib50_sg")
 
+        st.markdown("**Also sweep direction filters** *(off = use the Strategy-tab "
+                    "setting)* — this is how you compare low-first/high-first, the "
+                    "close-location vote, VWAP and AND vs OR head-to-head:")
+        sw = st.columns(4)
+        sw_form = sw[0].checkbox("Formation on/off", value=False, key="ib50_swform")
+        sw_close = sw[1].checkbox("Close-loc on/off", value=False, key="ib50_swclose")
+        sw_vwap = sw[2].checkbox("VWAP on/off", value=False, key="ib50_swvwap")
+        sw_logic = sw[3].checkbox("AND vs OR", value=False, key="ib50_swlogic")
+
+        # live combo counter so the user can gauge runtime before launching
+        if eg and sg and tg:
+            geom_n = sum(1 for e in eg for s in sg for t in tg if s > e)
+            fcfg_n = len(ib50.filter_configs(cfg, sw_form, sw_close, sw_vwap, sw_logic))
+            total_n = geom_n * fcfg_n
+            tone = "⚠️ " if total_n > 200 else ""
+            st.caption(f"{tone}**{total_n:,} configurations** to test "
+                       f"({fcfg_n} filter combo(s) × {geom_n} geometry). Each "
+                       f"re-simulates {len(prep):,} days — for big sweeps, narrow the "
+                       f"**date range** in the sidebar to keep it fast.")
+
         if st.button("🔎 Run optimization", type="primary", key="ib50_opt_run"):
             if not (eg and sg and tg):
                 st.warning("Pick at least one value in each grid.")
@@ -1991,7 +2013,9 @@ def ib50_mode():
                     if done % 3 == 0 or done == total:
                         prog.progress(done / total, text=f"{done}/{total} configs…")
 
-                res = ib50.optimize(prep, cfg, grid, min_tr, rank, progress=cb)
+                res = ib50.optimize(prep, cfg, grid, min_tr, rank,
+                                    sweep_form=sw_form, sweep_close=sw_close,
+                                    sweep_vwap=sw_vwap, sweep_logic=sw_logic, progress=cb)
                 prog.empty()
                 st.session_state["ib50_opt_res"] = res
 
@@ -2005,8 +2029,10 @@ def ib50_mode():
                 st.download_button("⬇ Download results", res.to_csv(index=False).encode(),
                                    file_name=f"ib50_optimizer_{instrument.replace(' ', '_')}.csv",
                                    mime="text/csv")
-                st.caption("Filters, breach gate and time windows stay as set on the "
-                           "Strategy tab — only entry/stop/target vary here.")
+                st.caption("Each row is a full config: the formation / close-loc / vwap "
+                           "/ logic columns show the filter stack, then the geometry. "
+                           "Breach gate, close-level % and time windows stay as set on "
+                           "the Strategy tab.")
 
 
 def live_mode():
