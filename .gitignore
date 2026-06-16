@@ -9,3 +9,4 @@ analysis/daywise_presets.json
 live_config.json
 analysis/_inst_*.csv
 analysis/confluence_presets.json
+data/instruments.json

@@ -40,6 +40,17 @@ LEGACY = {
     "BANK NIFTY": r"C:\NIFTY BANK_minute.csv",
 }
 
+# Canonical session times (minutes-since-midnight) for instruments whose FIRST
+# candle is not the cash open — 24-hour futures/FX where auto-detection would
+# pick the overnight/Globex open. These live in CODE so the cloud is always
+# correct regardless of the mutable instruments.json (which is a per-user
+# override layer only, and gitignored). NSE instruments aren't listed: their
+# first candle IS the open (09:15) and the 15:15 square-off is the default.
+SESSION_DEFAULTS = {
+    "NQ":     {"open_t": 9 * 60 + 30, "close_t": 16 * 60},   # 09:30–16:00 ET
+    "XAUUSD": {"open_t": 9 * 60 + 30, "close_t": 16 * 60},   # 09:30–16:00 ET
+}
+
 
 def _name_from_file(fname: str) -> str:
     stem = os.path.splitext(os.path.basename(fname))[0]
@@ -96,22 +107,34 @@ def _save_meta(meta: dict):
 
 
 def session_open(name: str, auto_open_t: int) -> int:
-    """The instrument's session-open minute: stored override, else auto-detected."""
+    """Session-open minute, resolved as:
+    user override (instruments.json) > code SESSION_DEFAULTS > auto-detected."""
     ov = _load_meta().get(name, {}).get("open_t")
-    return int(ov) if ov else int(auto_open_t)
+    if ov:
+        return int(ov)
+    d = SESSION_DEFAULTS.get(name, {}).get("open_t")
+    return int(d) if d is not None else int(auto_open_t)
 
 
 def session_close(name: str, default_close_t: int) -> int:
-    """The instrument's square-off minute: stored override, else the default
-    (15:15 NSE). E.g. NQ/XAUUSD → 960 = 16:00 ET cash close."""
+    """Square-off minute, resolved as:
+    user override > code SESSION_DEFAULTS (NQ/XAUUSD 16:00 ET) > default (15:15)."""
     ov = _load_meta().get(name, {}).get("close_t")
-    return int(ov) if ov else int(default_close_t)
+    if ov:
+        return int(ov)
+    d = SESSION_DEFAULTS.get(name, {}).get("close_t")
+    return int(d) if d is not None else int(default_close_t)
 
 
-def _set_override(name: str, field: str, value, default=None):
+def _set_override(name: str, field: str, value, fallback=None):
+    """Store a per-user override — but clear it when it equals the effective
+    default (code default if any, else the passed fallback), so the override
+    file never accumulates redundant/wrong values that match the baseline."""
+    code_def = SESSION_DEFAULTS.get(name, {}).get(field)
+    eff_default = code_def if code_def is not None else fallback
     meta = _load_meta()
     entry = meta.get(name, {})
-    if value is None or (default is not None and int(value) == int(default)):
+    if value is None or (eff_default is not None and int(value) == int(eff_default)):
         entry.pop(field, None)
     else:
         entry[field] = int(value)
