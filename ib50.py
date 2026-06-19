@@ -34,7 +34,8 @@ TRADING_DAYS = 252
 
 # ─── per-day preparation ──────────────────────────────────────────────────────
 
-def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int) -> list:
+def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
+              tf: int = 1) -> list:
     """
     Build per-day records from a cleaned minute frame. Session VWAP is anchored
     at the session open (open_t) per day — the Pine `cumPV` reset at ibStart.
@@ -43,7 +44,7 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int) -> l
     within the trading/square-off window): t_min, high, low, close, vwap.
     """
     ib_end = open_t + ib_min - 1
-    min_bars = min(20, max(5, int(ib_min * 0.66)))
+    min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
     has_vol = "volume" in min_df.columns
     out = []
     for day, g0 in min_df.groupby("date_only", sort=True):

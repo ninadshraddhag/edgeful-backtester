@@ -214,6 +214,15 @@ def render():
 
         st.multiselect("Day of week", DOW_ORDER, key="f_dow")
         st.multiselect("Gap type", GAP_ORDER, key="f_gap")
+        # precise gap-% band — drag to a specific gap, e.g. +0.2% to +0.8%
+        _gp = df.loc[df["instrument"] == inst, "gap_pct"].dropna()
+        g_min = float(np.clip(np.floor(_gp.min() * 10) / 10, -10.0, 0.0)) if len(_gp) else -5.0
+        g_max = float(np.clip(np.ceil(_gp.max() * 10) / 10, 0.0, 10.0)) if len(_gp) else 5.0
+        gap_rng = st.slider("Gap % range  (up +, down −)", g_min, g_max, (g_min, g_max),
+                            0.05, key=f"f_gap_pct_{inst}",
+                            help="Filter days by the exact opening-gap %. Drag the "
+                                 "handles to a band — e.g. +0.2% to +0.8% for a specific "
+                                 "gap-up day, or −0.5% to −0.1% for a small gap down.")
         st.multiselect("Day kind", KIND_ORDER, key="f_kind")
         st.radio("Which extreme formed first",
                  ["Either", "High formed first", "Low formed first"], key="f_first")
@@ -250,6 +259,7 @@ def render():
 
     sub = scope[scope["dow"].isin(st.session_state["f_dow"])]
     sub = sub[sub["gap_type"].isin(st.session_state["f_gap"])]
+    sub = sub[(sub["gap_pct"] >= gap_rng[0]) & (sub["gap_pct"] <= gap_rng[1])]
     sub = sub[sub["day_kind"].isin(st.session_state["f_kind"])]
     if st.session_state["f_first"] == "High formed first":
         sub = sub[sub[f"{tag}_first_side"] == "high"]
@@ -264,6 +274,8 @@ def render():
         bits.append(f"{date_sel[0]}→{date_sel[1]}")
     if len(st.session_state["f_dow"]) < 5:  bits.append("/".join(st.session_state["f_dow"]))
     if len(st.session_state["f_gap"]) < 3:  bits.append("/".join(st.session_state["f_gap"]))
+    if gap_rng[0] > g_min or gap_rng[1] < g_max:
+        bits.append(f"gap {gap_rng[0]:+.2f}%…{gap_rng[1]:+.2f}%")
     if len(st.session_state["f_kind"]) < 3: bits.append("/".join(st.session_state["f_kind"]))
     if st.session_state["f_first"] != "Either": bits.append(st.session_state["f_first"])
     st.subheader("  ·  ".join(str(b) for b in bits))

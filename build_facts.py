@@ -146,6 +146,29 @@ def detect_open_t(df):
     return int(firsts.mode().iloc[0])
 
 
+def to_timeframe(df, tf=5, open_t=None):
+    """
+    Resample a cleaned 1-min frame to `tf`-minute bars, anchored at the session
+    open so the first bucket starts exactly at open_t and buckets never cross a
+    day boundary. Returns the same column shape as clean_min (date, open, high,
+    low, close, [volume], date_only, t_min) where `date`/`t_min` are the bar's
+    OPEN time. `tf<=1` returns the frame unchanged.
+    """
+    if tf is None or tf <= 1:
+        return df
+    if open_t is None:
+        open_t = detect_open_t(df)
+    bucket = (df["t_min"].to_numpy() - open_t) // tf
+    g = df.groupby([df["date_only"].to_numpy(), bucket], sort=True)
+    agg = {"date": "first", "open": "first", "high": "max", "low": "min", "close": "last"}
+    if "volume" in df.columns:
+        agg["volume"] = "sum"
+    out = g.agg(agg).reset_index(drop=True)
+    out["date_only"] = out["date"].dt.date
+    out["t_min"] = out["date"].dt.hour * 60 + out["date"].dt.minute
+    return out.sort_values("date").reset_index(drop=True)
+
+
 def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
                       orb_min=ORB_MIN, ib_min=IB_MIN):
     """

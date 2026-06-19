@@ -76,12 +76,19 @@ def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None,
     return feat
 
 
-def live_probabilities(facts, feat):
-    """Conditional historical probabilities for today's emerging day type."""
+def live_probabilities(facts, feat, gap_band=None):
+    """Conditional historical probabilities for today's emerging day type.
+    gap_band=(lo,hi) conditions the historical set on an exact gap-% band instead
+    of today's coarse gap category."""
     out = {}
     base = facts[facts["dow"] == feat.get("dow")]
-    gt = feat.get("gap_type")
-    gapset = base[base["gap_type"] == gt] if gt else base
+    if gap_band is not None:
+        lo, hi = gap_band
+        gapset = base[(base["gap_pct"] >= lo) & (base["gap_pct"] <= hi)]
+        out["gap_band"] = (round(float(lo), 2), round(float(hi), 2))
+    else:
+        gt = feat.get("gap_type")
+        gapset = base[base["gap_type"] == gt] if gt else base
     out["n_gap"] = len(gapset)
     out["gap_slice"] = prob_app.stats(gapset, "ib")
 

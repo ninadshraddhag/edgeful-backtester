@@ -50,15 +50,17 @@ DEFAULT_CONFIG = {
 
 
 def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE_T,
-              ib_min=60) -> dict:
+              ib_min=60, tf=1) -> dict:
     """
     Group minute data into per-day records keyed by weekday.
     Each record: H, L, Rg, day_open, close, ph/pl/pt (post-IB arrays), date, dow.
     open_t  : session open (IB starts here).  close_t : square-off (no carry past this).
     ib_min  : Initial-Balance window length in minutes.
+    tf      : bar size (min) of min_df — used to scale the minimum-bar guard so a
+              60-min IB on 5-min bars (12 bars) isn't rejected.
     """
     ib_end = open_t + ib_min - 1
-    min_bars = min(20, max(5, int(ib_min * 0.66)))
+    min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
     # session VWAP for the optional "exit on close beyond VWAP" rule
     if "vwap" not in min_df.columns:
         min_df = min_df.copy()

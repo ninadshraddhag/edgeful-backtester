@@ -42,6 +42,7 @@ FACTS = os.path.join(HERE, "analysis", "facts.csv")
 # (NQ, XAUUSD, …). Re-evaluated every script run, so new uploads appear at once.
 PATHS = data_store.discover()
 
+EXEC_TF = 5    # execution & trade-browser timeframe (minutes) for ORB/IB modes
 DEFAULT_OPEN_T  = 9 * 60 + 15    # 09:15 (NSE); auto-detected per instrument
 DEFAULT_CLOSE_T = 15 * 60 + 15   # 15:15 square-off — no positions/levels carry overnight
 T_GRID   = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]      # target (× range)
@@ -115,7 +116,7 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
     target-vs-stop ordering exactly for ANY (target, stop) pair without re-simulating.
     Capped at the square-off (close_t) — nothing carries past it.
     """
-    mdf = load_min(mpath, mtime)
+    mdf = build_facts.to_timeframe(load_min(mpath, mtime), EXEC_TF, open_t)  # 5-min bars
     meta = get_facts(instrument, mpath, mtime, open_t, close_t, ib_min).set_index("date")
     end_t = (open_t + 15 - 1) if tag == "orb" else (open_t + ib_min - 1)
 
@@ -124,7 +125,7 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
         sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
         win  = sess[sess["t_min"] <= end_t]
         post = sess[sess["t_min"] > end_t]
-        if len(win) < 5 or post.empty:
+        if len(win) < 2 or post.empty:           # ORB(15)=3 bars · IB(60)=12 bars on 5-min
             continue
         hi, lo = win["high"].max(), win["low"].min()
         rng = hi - lo
@@ -431,9 +432,10 @@ def _edge_trade_browser(trades, mpath, mtime, open_t, end_t, close_t, key):
     if dd.empty:
         st.info("No minute data for this trade's day.")
         return
+    dd = build_facts.to_timeframe(dd, EXEC_TF, open_t)            # 5-min candles
     _edge_day_chart(dd, tr, open_t, end_t)
-    st.caption("Shaded box = ORB/IB window · green dashed = target · red dashed = stop · "
-               "▲/▼ entry · ✕ exit.")
+    st.caption("5-min candles · shaded box = ORB/IB window · green dashed = target · "
+               "red dashed = stop · ▲/▼ entry · ✕ exit.")
 
 
 # ─── confluence portfolio (combine strategies) ────────────────────────────────
@@ -800,8 +802,8 @@ def _filter_prepped(prepped, d0, d1):
 
 @st.cache_data(show_spinner=False)
 def prep_daywise(instrument, mpath, mtime, open_t, close_t, ib_min=60):
-    mdf = load_min(mpath, mtime)
-    return daywise.prep_days(mdf, open_t, close_t, ib_min)
+    mdf = build_facts.to_timeframe(load_min(mpath, mtime), EXEC_TF, open_t)  # 5-min bars
+    return daywise.prep_days(mdf, open_t, close_t, ib_min, tf=EXEC_TF)
 
 
 PRESETS_FILE = os.path.join(HERE, "analysis", "daywise_presets.json")
@@ -1285,18 +1287,17 @@ def _dw_trade_browser(res):
                             help="Session VWAP — the line the day-wise VWAP-close exit "
                                  "is measured against.")
     mdf = load_min(res["mpath"], res["mtime"])
-    mask = ((mdf["date_only"] == pd.Timestamp(tr["date"]).date())
-            & (mdf["t_min"] >= res["open_t"]) & (mdf["t_min"] <= res["close_t"]))
-    dd = mdf[mask]
+    dd = mdf[(mdf["date_only"] == pd.Timestamp(tr["date"]).date())
+             & (mdf["t_min"] >= res["open_t"]) & (mdf["t_min"] <= res["close_t"])]
     if dd.empty:
         st.info("No minute data for this trade's day.")
         return
-    vwap = None
-    if show_vwap:
-        vwap = _min_session_vwap(res["mpath"], res["mtime"])[mask.to_numpy()]
+    dd = build_facts.to_timeframe(dd, EXEC_TF, res["open_t"])     # 5-min candles
+    vwap = _session_vwap_day(dd) if show_vwap else None           # 5-min session VWAP
     _dw_day_chart(dd, tr, res["open_t"], res["ib_min"], vwap=vwap)
-    st.caption("Shaded box = IB window · grey dotted = entry level · red dashed = stop · "
-               "light green = TP1 (half exits, stop → breakeven) · dark green = TP2 · "
+    st.caption("5-min candles · shaded box = IB window · grey dotted = entry level · "
+               "red dashed = stop · light green = TP1 (half exits, stop → breakeven) · "
+               "dark green = TP2 · "
                "amber line = session VWAP · ▲/▼ entry · ✕ final exit.")
 
 
@@ -1477,6 +1478,7 @@ def _live_sample_section(instrument, feat, probs, open_t):
             if dd.empty:
                 st.info("No minute data for this day.")
             else:
+                dd = build_facts.to_timeframe(dd, EXEC_TF, open_t)    # 5-min candles
                 _live_sample_day_chart(dd, row, open_t, ib_min, close_t)
                 k = st.columns(5)
                 k[0].metric("IB High", f"{row['ib_high']:,.1f}")
@@ -1550,6 +1552,11 @@ def _live_render(instrument, feat, probs, open_t):
 
     # ── live probability cards ────────────────────────────────────────────────
     st.markdown("##### Live probabilities — historical odds for this exact day type")
+    gb = probs.get("gap_band")
+    if gb:
+        st.caption(f"Conditioned on a **gap band {gb[0]:+.2f}% … {gb[1]:+.2f}%** "
+                   f"(today's gap: {feat.get('gap_pct', 0):+.2f}%) instead of the coarse "
+                   f"gap category.")
     s = probs.get("matched") or probs.get("gap_slice")
     nlab = probs.get("n_matched", probs.get("n_gap", 0))
     if s:
@@ -1728,8 +1735,8 @@ def _live_render(instrument, feat, probs, open_t):
 
 @st.cache_data(show_spinner=False)
 def prep_ib50(instrument, mpath, mtime, open_t, close_t, ib_min):
-    mdf = load_min(mpath, mtime)
-    return ib50.prep_days(mdf, open_t, close_t, ib_min)
+    mdf = build_facts.to_timeframe(load_min(mpath, mtime), EXEC_TF, open_t)  # 5-min bars
+    return ib50.prep_days(mdf, open_t, close_t, ib_min, tf=EXEC_TF)
 
 
 def _session_vwap_day(dd):
@@ -1800,9 +1807,10 @@ def _ib50_trade_browser(trades, mpath, mtime, open_t, close_t, ib_min):
     if dd.empty:
         st.info("No minute data for this trade's day.")
         return
+    dd = build_facts.to_timeframe(dd, EXEC_TF, open_t)            # 5-min candles
     _ib50_day_chart(dd, tr, open_t, ib_min)
-    st.caption("Shaded box = IB · amber = session VWAP · grey dotted = entry · "
-               "red dashed = stop · green dashed = target · ▲/▼ entry · ✕ exit.")
+    st.caption("5-min candles · shaded box = IB · amber = session VWAP · grey dotted = "
+               "entry · red dashed = stop · green dashed = target · ▲/▼ entry · ✕ exit.")
 
 
 IB50_LOG_COLS = ["date", "dow", "direction", "entry time", "exit time", "entry",
@@ -2059,6 +2067,12 @@ def live_mode():
                                 help="Only days within this window feed the live "
                                      "probabilities — recent regimes are usually more "
                                      "relevant than the full 10 years.")
+        gb = st.slider("Gap % band (match historical days)", -5.0, 5.0, (-5.0, 5.0),
+                       0.05, key="live_gap_band",
+                       help="Default (full) uses today's gap category. Narrow this to "
+                            "condition the probabilities on days with a specific gap "
+                            "band — e.g. +0.2% to +0.8%.")
+        gap_band = None if (gb[0] <= -5.0 and gb[1] >= 5.0) else (gb[0], gb[1])
 
         if source_kind == "Kotak Neo (live)":
             auth_state = st.session_state.get("kotak_auth_state", "idle")
@@ -2195,7 +2209,7 @@ def live_mode():
             nt = min(ist.hour * 60 + ist.minute, 15 * 60 + 15)
         feat = live_stats.classify_live(today, prev, open_t, 15 * 60 + 15,
                                         now_t=nt, ib_min=ib_min)
-        probs = live_stats.live_probabilities(fn, feat)
+        probs = live_stats.live_probabilities(fn, feat, gap_band=gap_band)
         _live_render(instrument, feat, probs, open_t)
 
     panel()
