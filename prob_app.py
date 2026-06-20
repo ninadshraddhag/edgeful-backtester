@@ -230,11 +230,16 @@ def render():
         st.divider()
         base_inst = df[df["instrument"] == inst]
         size_col = f"{tag}_range"
-        s_lo = float(np.floor(base_inst[size_col].min()))
-        s_hi = float(np.ceil(base_inst[size_col].quantile(0.995)))
-        size_rng = st.slider(f"{tag.upper()} size (points)", s_lo, s_hi, (s_lo, s_hi),
-                             key=f"f_size_{tag}_{inst}_{ib_min}")
-        st.caption("Filter days by how wide the opening range was.")
+        # IB/ORB size as a % of price (volatility-normalized, comparable across
+        # instruments) instead of raw points
+        size_pct_all = (base_inst[size_col] / base_inst["day_open"] * 100).dropna()
+        s_lo = float(np.floor(size_pct_all.min() * 100) / 100) if len(size_pct_all) else 0.0
+        s_hi = float(np.ceil(size_pct_all.quantile(0.995) * 100) / 100) if len(size_pct_all) else 2.0
+        size_rng = st.slider(f"{tag.upper()} size (% of price)", s_lo, s_hi, (s_lo, s_hi),
+                             0.01, key=f"f_sizepct_{tag}_{inst}_{ib_min}",
+                             help="Opening-range width as a % of price — a "
+                                  "volatility-normalized size filter (e.g. 0.20%–0.40%).")
+        st.caption("Filter days by IB/ORB size as a % of price.")
 
         st.divider()
         st.markdown("**Extension / Retracement (× range)**")
@@ -265,7 +270,8 @@ def render():
         sub = sub[sub[f"{tag}_first_side"] == "high"]
     elif st.session_state["f_first"] == "Low formed first":
         sub = sub[sub[f"{tag}_first_side"] == "low"]
-    sub = sub[(sub[size_col] >= size_rng[0]) & (sub[size_col] <= size_rng[1])]
+    _sz_pct = sub[size_col] / sub["day_open"] * 100
+    sub = sub[(_sz_pct >= size_rng[0]) & (_sz_pct <= size_rng[1])]
 
     # ── headline sentence ─────────────────────────────────────────────────────
     setup_label = f"IB ({ib_min} min)" if tag == "ib" else "ORB (15 min)"

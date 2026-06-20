@@ -33,6 +33,7 @@ import indicators as ind
 DEFAULT_OPEN_T  = 9 * 60 + 15   # 09:15 (NSE); auto-detected per instrument in the app
 DEFAULT_CLOSE_T = 15 * 60 + 15  # 15:15 square-off — positions force-exit, no overnight carry
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+VWAP_EXIT_TF = 5    # the VWAP-close exit is evaluated on this timeframe (everything else 1-min)
 
 
 def detect_open_t(min_df):
@@ -61,10 +62,6 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
     """
     ib_end = open_t + ib_min - 1
     min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
-    # session VWAP for the optional "exit on close beyond VWAP" rule
-    if "vwap" not in min_df.columns:
-        min_df = min_df.copy()
-        min_df["vwap"] = ind.session_vwap(min_df).to_numpy()
     out = {d: [] for d in WEEKDAYS}
     for day, g0 in min_df.groupby("date_only", sort=True):
         dow = pd.Timestamp(day).day_name()
@@ -97,6 +94,10 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
         # "first N-min candle green/red" filter use ANY window at runtime
         f0 = sess[sess["t_min"] <= sess["t_min"].iloc[0] + 119]
 
+        # 5-min VWAP step + 5-min-close marker for the VWAP-close exit (sim is 1-min)
+        pv5_full, is5_full = ind.vwap5_steps(sess, open_t, VWAP_EXIT_TF)
+        post_mask = (sess["t_min"].to_numpy() > ib_end)
+
         out[dow].append({
             "date": pd.Timestamp(day), "dow": dow,
             "H": float(H), "L": float(L), "Rg": float(Rg),
@@ -109,8 +110,9 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
             "ph": post["high"].values.astype(float),
             "pl": post["low"].values.astype(float),
             "pt": post["t_min"].values.astype(float),
-            "pc": post["close"].values.astype(float),     # post-IB closes (VWAP exit)
-            "pv": post["vwap"].values.astype(float),       # post-IB session VWAP
+            "pc": post["close"].values.astype(float),     # post-IB 1-min closes
+            "pv5": pv5_full[post_mask],                    # 5-min VWAP (exit reference)
+            "is5": is5_full[post_mask],                    # True at each 5-min close
         })
     return out
 
@@ -124,16 +126,17 @@ def _vwap_cross(close_px, vwap_px, is_long):
 
 
 def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close,
-             pc=None, pv=None, vwap_exit=False):
+             pc=None, pv5=None, is5=None, vwap_exit=False):
     """
-    Scale-out simulation from entry bar `start`.
+    Scale-out simulation from entry bar `start` on 1-min bars.
     Returns (pnl_points, outcome, exit_bar_index, final_exit_price).
 
-    Intrabar stop/target take priority (conservative); the optional VWAP-close
-    exit is evaluated at the bar's CLOSE, after stop/target, and closes the whole
-    remaining position (full pre-TP1, the runner post-TP1).
+    Intrabar stop/target take priority (conservative). The optional VWAP-close
+    exit is evaluated only at 5-MINUTE closes (`is5`) against the 5-min VWAP
+    (`pv5`) — everything else (entries, stop, target) is 1-min. It closes the
+    whole remaining position (full pre-TP1, the runner post-TP1).
     """
-    use_vwap = vwap_exit and pv is not None and pc is not None
+    use_vwap = vwap_exit and pv5 is not None and pc is not None and is5 is not None
     realized = 0.0
     tp1_hit = False
     cur_stop = stop
@@ -163,8 +166,8 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close,
             if tp2_reach:
                 realized += 0.5 * ((tp2 - entry) if is_long else (entry - tp2))
                 return realized, "tp1+tp2", i, tp2
-        # optional VWAP-close exit (whole remaining position, at this bar's close)
-        if use_vwap and _vwap_cross(pc[i], pv[i], is_long):
+        # optional VWAP-close exit — only at a 5-min close, vs the 5-min VWAP
+        if use_vwap and is5[i] and _vwap_cross(pc[i], pv5[i], is_long):
             rem = 0.5 if tp1_hit else 1.0
             realized += rem * ((pc[i] - entry) if is_long else (entry - pc[i]))
             return realized, ("tp1+vwap" if tp1_hit else "vwap"), i, pc[i]
@@ -220,8 +223,8 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
     if len(idx) == 0:
         return None
     pnl, outcome, exit_i, exit_px = _sim_dir(ph, pl, idx[0], entry, stop, tp1, tp2,
-                                             is_long, rec["close"],
-                                             rec.get("pc"), rec.get("pv"), vwap_exit)
+                                             is_long, rec["close"], rec.get("pc"),
+                                             rec.get("pv5"), rec.get("is5"), vwap_exit)
     extras = dict(entry_t=float(pt[idx[0]]), exit_t=float(pt[exit_i]),
                   exit_px=float(exit_px), stop_px=float(stop),
                   tp1_px=float(tp1), tp2_px=float(tp2))

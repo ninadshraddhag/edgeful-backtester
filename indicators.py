@@ -217,6 +217,37 @@ def session_vwap(df: pd.DataFrame) -> pd.Series:
     return num / den
 
 
+def vwap5_steps(sess: pd.DataFrame, open_t: int, tf: int = 5):
+    """
+    For ONE day's session, return (pv5, is5) aligned to its 1-min rows:
+      pv5 — the tf-minute session VWAP value of the tf-min bucket each 1-min bar
+            belongs to (volume-weighted; TWAP fallback). At a bucket's CLOSE this
+            equals the completed tf-min VWAP, so it carries no lookahead there.
+      is5 — True on the last 1-min bar of each tf-min bucket (a tf-min close).
+    Lets a 1-min sim run a *tf-min* VWAP-close exit: check `is5 & close-vs-pv5`.
+    """
+    t = sess["t_min"].to_numpy()
+    n = len(t)
+    if n == 0:
+        return np.zeros(0), np.zeros(0, dtype=bool)
+    b = (t - open_t) // tf
+    typ = ((sess["high"] + sess["low"] + sess["close"]) / 3.0).to_numpy()
+    if "volume" in sess.columns:
+        v = pd.to_numeric(sess["volume"], errors="coerce").fillna(0.0).to_numpy()
+        if v.sum() <= 0:
+            v = np.ones(n)
+    else:
+        v = np.ones(n)
+    agg = pd.DataFrame({"b": b, "tv": typ * v, "v": v}).groupby("b", sort=True)
+    bucket_vwap = agg["tv"].sum().cumsum() / agg["v"].sum().cumsum()
+    pv5 = bucket_vwap.reindex(b).to_numpy()
+    # a tf-min close is the last minute of a complete bucket on the grid anchored
+    # at open_t — deterministic, so a partial bucket at the session end is NOT a
+    # tf-min close (the engine's square-off handles that final bar instead)
+    is5 = ((t - open_t) % tf == (tf - 1))
+    return pv5, is5
+
+
 # ─── key levels: PDH / PDL ────────────────────────────────────────────────────
 
 def key_levels(df: pd.DataFrame) -> pd.DataFrame:

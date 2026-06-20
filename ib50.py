@@ -28,8 +28,11 @@ import itertools
 import numpy as np
 import pandas as pd
 
+import indicators as ind
+
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 TRADING_DAYS = 252
+VWAP_EXIT_TF = 5    # the VWAP-close exit is evaluated on this timeframe (vote/entries 1-min)
 
 
 # ─── per-day preparation ──────────────────────────────────────────────────────
@@ -85,6 +88,11 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
         lb = (np.maximum.accumulate(pl_arr < L).astype(bool) if len(pl_arr)
               else np.zeros(0, dtype=bool))
 
+        # 5-min VWAP step + 5-min-close marker for the VWAP-close EXIT (the
+        # direction VOTE keeps the 1-min VWAP `pv`; entries/SL/TP stay 1-min)
+        pv5_full, is5_full = ind.vwap5_steps(sess, open_t, VWAP_EXIT_TF)
+        pm = post_mask.to_numpy()
+
         out.append({
             "date": pd.Timestamp(day), "dow": dow,
             "ib_high": H, "ib_low": L, "ib_range": rng, "ib_close": ib_close,
@@ -92,7 +100,8 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
             "pt": post["t_min"].to_numpy(float),
             "ph": ph_arr, "pl": pl_arr,
             "pc": post["close"].to_numpy(float),
-            "pv": vwap[post_mask].to_numpy(float),
+            "pv": vwap[post_mask].to_numpy(float),     # 1-min VWAP (direction vote)
+            "pv5": pv5_full[pm], "is5": is5_full[pm],  # 5-min VWAP (exit only)
             "hb": hb, "lb": lb,
         })
     return out
@@ -151,6 +160,7 @@ def sim_day(rec, cfg) -> list:
         return []
     ib_high, ib_low, ib_close = rec["ib_high"], rec["ib_low"], rec["ib_close"]
     pt, ph, pl, pc, pv = rec["pt"], rec["ph"], rec["pl"], rec["pc"], rec["pv"]
+    pv5, is5 = rec["pv5"], rec["is5"]              # 5-min VWAP for the exit only
     n = len(pt)
     if n == 0:
         return []
@@ -197,7 +207,9 @@ def sim_day(rec, cfg) -> list:
             longp = pos == 1
             hit_sl = (lo <= s_px) if longp else (hi >= s_px)
             hit_tp = (hi >= t_px) if longp else (lo <= t_px)
-            vwap_exit = use_vwap and (not np.isnan(vw)) and (cl < vw if longp else cl > vw)
+            # VWAP-close exit: only at a 5-min close, vs the 5-min VWAP
+            vwap_exit = (use_vwap and is5[i] and (not np.isnan(pv5[i]))
+                         and (cl < pv5[i] if longp else cl > pv5[i]))
             eod = tm >= eff_min
             if hit_sl:
                 exit_px, reason = s_px, "SL"
