@@ -1811,6 +1811,224 @@ IB50_LOG_COLS = ["date", "dow", "direction", "entry time", "exit time", "entry",
                  "stop", "target", "exit", "qty", "r", "pnl", "outcome"]
 
 
+# ─── IB50 confluence (combine configs into a portfolio) ───────────────────────
+
+IB50_CONFL_FILE = os.path.join(HERE, "analysis", "ib50_confluence.json")
+
+
+def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
+    return dict(ib_min=ib_min, open_t=570, close_t=960,
+                use_formation=uf, use_closeloc=uc, close_loc_pct=50.0, use_vwap=uv,
+                logic="AND", use_breach=ub, breach_mode=bmode, breach_scope="Directional",
+                entry_pct=float(e), sl_pct=float(s), target_pct=float(t),
+                risk_usd=1500.0, point_value=20.0, use_entry_window=False,
+                entry_start_t=570, entry_end_t=900, use_exit_time=False, exit_t=945,
+                eff_min=960, allow_reentry=False)
+
+
+# Built-in NQ stack from the stress test: 3 LOW-CORRELATION configs (avg corr ~0.11)
+# across different IB durations / filter families / breach modes. ~6.4 R/month
+# in-sample (≈6.4% at 1% risk) over ~44 months, 84% green months, worst month
+# −8.7R, max DD −12.6R, ~9.7 trades/wk — read the caveats in the tab before trusting.
+IB50_SEED_PRESETS = {
+    "NQ diversified-3 (~6.4R/mo, in-sample)": [
+        {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, False, True,  True,  "Require Breached",     25, 75,  100)},
+        {"instrument": "NQ", "cfg": _ib50_seed_cfg(60, False, True,  False, False, "Require Not-Breached", 25, 75,  150)},
+        {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, True,  False, True,  "Require Breached",     25, 100, 75)},
+    ],
+}
+
+
+def _ib50_confl_store_load():
+    if os.path.exists(IB50_CONFL_FILE):
+        try:
+            return json.load(open(IB50_CONFL_FILE, encoding="utf-8"))
+        except Exception:
+            pass
+    return {"presets": {}, "last": []}
+
+
+def _ib50_confl_store_save(d):
+    os.makedirs(os.path.dirname(IB50_CONFL_FILE), exist_ok=True)
+    json.dump(d, open(IB50_CONFL_FILE, "w", encoding="utf-8"), indent=2)
+
+
+def _ib50_confl_components():
+    if "ib50_confl" not in st.session_state:
+        st.session_state["ib50_confl"] = _ib50_confl_store_load().get("last") or []
+    return st.session_state["ib50_confl"]
+
+
+def _ib50_confl_persist():
+    s = _ib50_confl_store_load()
+    s["last"] = st.session_state.get("ib50_confl", [])
+    _ib50_confl_store_save(s)
+
+
+def _ib50_confl_add(comp):
+    comps = _ib50_confl_components()
+    if comp not in comps:
+        comps.append(comp)
+        _ib50_confl_persist()
+        return True
+    return False
+
+
+def _ib50_cfg_label(cfg):
+    flags = "".join([("F" if cfg["use_formation"] else "·"),
+                     ("C" if cfg["use_closeloc"] else "·"),
+                     ("V" if cfg["use_vwap"] else "·")])
+    br = (f"breach {cfg['breach_mode'][8:11]}/{cfg['breach_scope'][:3]}"
+          if cfg["use_breach"] else "no-breach")
+    win = ""
+    if cfg.get("use_entry_window"):
+        e0, e1 = cfg["entry_start_t"], cfg["entry_end_t"]
+        win = f" · win {e0//60:02d}:{e0%60:02d}-{e1//60:02d}:{e1%60:02d}"
+    return (f"IB{cfg['ib_min']} · {flags} {cfg['logic']} · {br} · "
+            f"e{cfg['entry_pct']:g}/s{cfg['sl_pct']:g}/t{cfg['target_pct']:g}{win}")
+
+
+def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
+    st.caption("Combine several IB50 configs into ONE portfolio. Uncorrelated configs "
+               "stack monthly R and smooth the equity curve — the legitimate way to "
+               "scale returns at a fixed 1% per trade. All P&L is shown in **R** "
+               "(1R = your 1% risk), so net R ≈ % return.")
+    comps = _ib50_confl_components()
+
+    store = _ib50_confl_store_load()
+    with st.expander("💾 Save / Load confluences"):
+        s_ = st.columns([2, 1, 2, 1, 1])
+        pname = s_[0].text_input("Name", key="ib50_confl_name", placeholder="e.g. NQ-stack-1")
+        if s_[1].button("Save", key="ib50_confl_save", use_container_width=True):
+            if comps and pname.strip():
+                store["presets"][pname.strip()] = comps
+                store["last"] = comps
+                _ib50_confl_store_save(store)
+                st.success(f"Saved '{pname.strip()}' ({len(comps)} configs).")
+            else:
+                st.warning("Add configs and enter a name first.")
+        names = list(IB50_SEED_PRESETS.keys()) + list(store.get("presets", {}).keys())
+        sel = s_[2].selectbox("Saved (★ = built-in stress-test stack)",
+                              ["—"] + [f"★ {n}" for n in IB50_SEED_PRESETS]
+                              + list(store.get("presets", {}).keys()), key="ib50_confl_sel")
+        if s_[3].button("Load", key="ib50_confl_load", use_container_width=True) and sel != "—":
+            clean = sel[2:] if sel.startswith("★ ") else sel
+            src = IB50_SEED_PRESETS.get(clean) or store["presets"].get(clean)
+            if src:
+                st.session_state["ib50_confl"] = [dict(c) for c in src]
+                _ib50_confl_persist()
+                st.rerun()
+        if s_[4].button("Delete", key="ib50_confl_del", use_container_width=True) and sel != "—":
+            store["presets"].pop(sel, None)
+            _ib50_confl_store_save(store)
+            st.rerun()
+
+    if not comps:
+        st.info("No configs yet. Tune a strategy on the **🎯 Strategy** tab and click "
+                "“➕ Add this config to Confluence”, then come back here.")
+        return
+
+    rows = [{"#": i + 1, "instrument": c["instrument"], "config": _ib50_cfg_label(c["cfg"])}
+            for i, c in enumerate(comps)]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    rc = st.columns([2, 1, 1])
+    rm = rc[0].multiselect("Remove #", list(range(1, len(comps) + 1)), key="ib50_confl_rm")
+    if rc[1].button("Remove", use_container_width=True, key="ib50_confl_rmbtn") and rm:
+        st.session_state["ib50_confl"] = [c for i, c in enumerate(comps, 1) if i not in rm]
+        _ib50_confl_persist(); st.rerun()
+    if rc[2].button("Clear all", use_container_width=True, key="ib50_confl_clr"):
+        st.session_state["ib50_confl"] = []; _ib50_confl_persist(); st.rerun()
+
+    cur = [c for c in comps if c["instrument"] == instrument]
+    if len(comps) - len(cur):
+        st.caption(f"⚠ {len(comps) - len(cur)} config(s) belong to other instruments and "
+                   "are excluded here — switch the sidebar instrument to run them.")
+    if not cur:
+        st.warning(f"No configs for {instrument}.")
+        return
+
+    # run each component on its own (ib_min-specific) prep, in the date range
+    frames, monthly = [], {}
+    for i, c in enumerate(cur, 1):
+        cfg = c["cfg"]
+        prep = prep_ib50(instrument, mpath, mtime, cfg["open_t"], cfg["close_t"], cfg["ib_min"])
+        prep = [r for r in prep if d0 <= r["date"].date() <= d1]
+        tr = ib50.run(prep, cfg)
+        if tr.empty:
+            continue
+        tr = tr.copy(); tr["cfg"] = f"#{i}"
+        frames.append(tr)
+        monthly[f"#{i}"] = tr.set_index("date")["r"].resample("ME").sum()
+    if not frames:
+        st.warning("No trades from these configs in the selected date range.")
+        return
+    T = pd.concat(frames).sort_values(["date", "entry_t"]).reset_index(drop=True)
+
+    r = T["r"].to_numpy()
+    span_days = max((pd.Timestamp(d1) - pd.Timestamp(d0)).days, 1)
+    n_months = span_days / 30.44
+    n_weeks = span_days / 7.0
+    wins = r > 0
+    gl = -r[r < 0].sum()
+    cumR = np.cumsum(r)
+    ddR = (cumR - np.maximum.accumulate(cumR)).min()
+    mR = T.set_index("date")["r"].resample("ME").sum()
+
+    k = st.columns(6)
+    k[0].metric("Configs", len(frames))
+    k[1].metric("Trades", f"{len(T):,}")
+    k[2].metric("Trades / week", f"{len(T)/n_weeks:.1f}")
+    k[3].metric("Net R  (≈ % ret)", f"{r.sum():+.1f}R")
+    k[4].metric("R / month", f"{r.sum()/n_months:+.2f}R")
+    k[5].metric("Win rate", pct(wins.mean()))
+    k2 = st.columns(6)
+    k2[0].metric("Profit factor", f"{r[r>0].sum()/gl:.2f}" if gl > 0 else "∞")
+    k2[1].metric("Avg R / trade", f"{r.mean():+.3f}R")
+    k2[2].metric("Max DD", f"{ddR:.1f}R")
+    k2[3].metric("Green months", f"{(mR>0).mean()*100:.0f}%")
+    k2[4].metric("Worst month", f"{mR.min():+.1f}R")
+    k2[5].metric("Median month", f"{mR.median():+.2f}R")
+
+    e1c, e2c = st.columns(2)
+    fig = go.Figure()
+    fig.add_scatter(x=T["date"], y=cumR, mode="lines", line=dict(color="#2196F3", width=2),
+                    fill="tozeroy", fillcolor="rgba(33,150,243,0.08)")
+    fig.update_layout(title="Portfolio equity (cumulative R)", height=300,
+                      template="plotly_white", margin=dict(t=36, b=10), yaxis_title="R")
+    e1c.plotly_chart(fig, use_container_width=True)
+    figm = go.Figure()
+    figm.add_bar(x=[f"{p.year}-{p.month:02d}" for p in mR.index], y=mR.values,
+                 marker_color=["#2E7D32" if v > 0 else "#C62828" for v in mR.values])
+    figm.update_layout(title="Monthly R", height=300, template="plotly_white",
+                       margin=dict(t=36, b=10), yaxis_title="R")
+    e2c.plotly_chart(figm, use_container_width=True)
+
+    contrib = (T.groupby("cfg").agg(trades=("r", "size"), netR=("r", "sum"),
+                                    win=("win", "mean"), avgR=("r", "mean")))
+    contrib["R/month"] = (contrib["netR"] / n_months).round(2)
+    contrib["netR"] = contrib["netR"].round(1)
+    contrib["win"] = (contrib["win"] * 100).round(1)
+    contrib["avgR"] = contrib["avgR"].round(3)
+    cmap = {f"#{i}": _ib50_cfg_label(c["cfg"]) for i, c in enumerate(cur, 1)}
+    contrib.insert(0, "config", [cmap.get(ix, ix) for ix in contrib.index])
+    st.markdown("**Per-config contribution**")
+    st.dataframe(contrib, use_container_width=True)
+
+    if len(monthly) >= 2:
+        mdf = pd.DataFrame(monthly).fillna(0.0)
+        st.markdown("**Monthly-R correlation** (lower = more diversification → smoother curve)")
+        st.dataframe(mdf.corr().round(2), use_container_width=True)
+
+    st.download_button("⬇ Download portfolio trades (CSV)",
+                       T[["cfg", "date", "dow", "direction", "entry", "stop", "target",
+                          "exit", "r", "pnl", "outcome"]].to_csv(index=False).encode(),
+                       file_name=f"ib50_confluence_{instrument.replace(' ', '_')}.csv",
+                       mime="text/csv")
+    st.caption("In-sample portfolio. At 1% risk/trade, net R ≈ % return. Validate the "
+               "stack on a held-out date range before trusting the monthly numbers — "
+               "stacking many configs is the easiest way to overfit.")
+
+
 def ib50_mode():
     st.caption("**IB50 — IB Retracement strategy** (port of the TradingView Pine "
                "indicator). Trades retracements into the Initial Balance with "
@@ -1911,7 +2129,8 @@ def ib50_mode():
     )
 
     st.divider()
-    tab1, tab2 = st.tabs(["🎯 Strategy", "🔬 Optimizer (entry/stop/target sweep)"])
+    tab1, tab2, tab3 = st.tabs(["🎯 Strategy", "🔬 Optimizer (entry/stop/target sweep)",
+                                "🧩 Confluence (combine configs)"])
 
     # ── strategy tab ──────────────────────────────────────────────────────────
     with tab1:
@@ -1963,6 +2182,11 @@ def ib50_mode():
                                    mime="text/csv")
             with st.expander("🔍 Trade browser — any trade on its day's chart"):
                 _ib50_trade_browser(trades, mpath, mtime, open_t, close_t, ib_min)
+
+            if st.button("➕ Add this config to Confluence", key="ib50_add_confl"):
+                added = _ib50_confl_add({"instrument": instrument, "cfg": cfg})
+                st.success("Added to the 🧩 Confluence tab." if added
+                           else "This exact config is already in the confluence.")
 
     # ── optimizer tab ─────────────────────────────────────────────────────────
     with tab2:
@@ -2035,6 +2259,10 @@ def ib50_mode():
                            "/ logic columns show the filter stack, then the geometry. "
                            "Breach gate, close-level % and time windows stay as set on "
                            "the Strategy tab.")
+
+    # ── confluence tab ────────────────────────────────────────────────────────
+    with tab3:
+        _ib50_confluence_tab(instrument, mpath, mtime, d0, d1)
 
 
 # ═══════════════════════ CPR Algos — Central Pivot Range systems ══════════════
