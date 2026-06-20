@@ -1826,12 +1826,17 @@ def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
                 eff_min=960, allow_reentry=False)
 
 
-# Built-in NQ stack from the stress test: 3 LOW-CORRELATION configs (avg corr ~0.11)
-# across different IB durations / filter families / breach modes. ~6.4 R/month
-# in-sample (≈6.4% at 1% risk) over ~44 months, 84% green months, worst month
-# −8.7R, max DD −12.6R, ~9.7 trades/wk — read the caveats in the tab before trusting.
+# Built-in NQ stack: 3 LOW-CORRELATION configs (avg corr ~0.11) across different IB
+# durations / filter families / breach modes. FULL +7.6 R/month (280R / 37 calendar
+# months ≈ 7.6% at 1% risk; the tab's span/30.44 shows ~7.9). Train (pre-2025)
+# +7.0R/mo → holdout (2025, untouched) +8.7R/mo = 123% retention; green months
+# 80%→92%; holdout max DD only −21.7R. An exhaustive 102k-combo search (2-,3-,4-leg)
+# could NOT beat this out-of-sample: every train-optimal combo decayed to ~50-70%
+# retention with 30-50R holdout drawdowns (they overload one correlated leg).
+# Diversification > optimization. Gross of costs — slippage trims a couple R/month.
+# Use the Train/Holdout panel and read the caveats before trusting it.
 IB50_SEED_PRESETS = {
-    "NQ diversified-3 (~6.4R/mo, in-sample)": [
+    "NQ diversified-3 (~7.8R/mo IS · holds OOS)": [
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, False, True,  True,  "Require Breached",     25, 75,  100)},
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(60, False, True,  False, False, "Require Not-Breached", 25, 75,  150)},
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, True,  False, True,  "Require Breached",     25, 100, 75)},
@@ -1886,6 +1891,23 @@ def _ib50_cfg_label(cfg):
         win = f" · win {e0//60:02d}:{e0%60:02d}-{e1//60:02d}:{e1%60:02d}"
     return (f"IB{cfg['ib_min']} · {flags} {cfg['logic']} · {br} · "
             f"e{cfg['entry_pct']:g}/s{cfg['sl_pct']:g}/t{cfg['target_pct']:g}{win}")
+
+
+def _confl_seg_metrics(sub, start, end):
+    """Portfolio metrics (in R) for a trade slice over [start, end)."""
+    days = max((pd.Timestamp(end) - pd.Timestamp(start)).days, 1)
+    months, weeks = days / 30.44, days / 7.0
+    if sub is None or sub.empty:
+        return dict(trades=0, tpw=0.0, netR=0.0, Rpm=0.0, win=0.0, pf=float("nan"),
+                    maxdd=0.0, green=0.0, worst=0.0, months=months)
+    r = sub["r"].to_numpy(float)
+    gl = -r[r < 0].sum()
+    cum = np.cumsum(r)
+    dd = (cum - np.maximum.accumulate(cum)).min()
+    mR = sub.set_index("date")["r"].resample("ME").sum()
+    return dict(trades=len(sub), tpw=len(sub) / weeks, netR=r.sum(), Rpm=r.sum() / months,
+                win=(r > 0).mean() * 100, pf=(r[r > 0].sum() / gl) if gl > 0 else float("inf"),
+                maxdd=dd, green=(mR > 0).mean() * 100, worst=mR.min(), months=months)
 
 
 def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
@@ -1989,12 +2011,55 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     k2[4].metric("Worst month", f"{mR.min():+.1f}R")
     k2[5].metric("Median month", f"{mR.median():+.2f}R")
 
+    # ── train / holdout (out-of-sample) validation ───────────────────────────
+    st.markdown("#### 🔬 Train / Holdout validation — does the edge survive "
+                "out-of-sample?")
+    default_split = (pd.Timestamp(d0) + (pd.Timestamp(d1) - pd.Timestamp(d0)) * 0.7).date()
+    split = st.date_input("Split date — configs are tuned on **train** (before), judged "
+                          "on untouched **holdout** (after)", value=default_split,
+                          min_value=d0, max_value=d1, key="ib50_confl_split")
+    if isinstance(split, (tuple, list)):
+        split = split[0]
+    train = T[T["date"].dt.date < split]
+    hold = T[T["date"].dt.date >= split]
+    mt = _confl_seg_metrics(train, d0, split)
+    mh = _confl_seg_metrics(hold, split, d1)
+    cc = st.columns(3)
+    for col, nm, mm in [(cc[0], "Train (in-sample)", mt),
+                        (cc[1], "Holdout (out-of-sample)", mh),
+                        (cc[2], "Retention", None)]:
+        if mm is not None:
+            col.markdown(f"**{nm}**")
+            col.metric("R / month", f"{mm['Rpm']:+.2f}R")
+            col.metric("Win rate", f"{mm['win']:.1f}%")
+            col.metric("Profit factor", f"{mm['pf']:.2f}" if np.isfinite(mm['pf']) else "∞")
+            col.metric("Max DD", f"{mm['maxdd']:.1f}R")
+            col.metric("Green months", f"{mm['green']:.0f}%")
+        else:
+            ret = (mh["Rpm"] / mt["Rpm"] * 100) if mt["Rpm"] > 0 else 0.0
+            col.markdown("**Holdout ÷ Train**")
+            col.metric("R/month kept", f"{ret:.0f}%")
+            col.metric("Holdout trades/wk", f"{mh['tpw']:.1f}")
+            verdict, tone = (("✅ Edge holds", "#2E7D32") if ret >= 60 and mh["Rpm"] > 0 else
+                             ("⚠ Degrades", "#F9A825") if mh["Rpm"] > 0 else
+                             ("❌ Breaks (negative OOS)", "#C62828"))
+            col.markdown(f"<div style='font-weight:700;color:{tone}'>{verdict}</div>",
+                         unsafe_allow_html=True)
+    st.caption("A real edge keeps most of its in-sample R/month out-of-sample. If the "
+               "holdout collapses (or goes negative), the stack is curve-fit — re-pick "
+               "configs that work on BOTH halves, not just the optimizer's favourites.")
+
     e1c, e2c = st.columns(2)
     fig = go.Figure()
-    fig.add_scatter(x=T["date"], y=cumR, mode="lines", line=dict(color="#2196F3", width=2),
-                    fill="tozeroy", fillcolor="rgba(33,150,243,0.08)")
-    fig.update_layout(title="Portfolio equity (cumulative R)", height=300,
-                      template="plotly_white", margin=dict(t=36, b=10), yaxis_title="R")
+    tr_mask = T["date"].dt.date < split
+    fig.add_scatter(x=T["date"][tr_mask], y=cumR[tr_mask.to_numpy()], mode="lines",
+                    line=dict(color="#1565C0", width=2), name="Train")
+    fig.add_scatter(x=T["date"][~tr_mask], y=cumR[(~tr_mask).to_numpy()], mode="lines",
+                    line=dict(color="#FB8C00", width=2), name="Holdout")
+    fig.add_vline(x=pd.Timestamp(split), line=dict(width=1, dash="dot", color="#90A4AE"))
+    fig.update_layout(title="Portfolio equity (cumulative R) — blue train · orange holdout",
+                      height=300, template="plotly_white", margin=dict(t=36, b=10),
+                      yaxis_title="R", legend=dict(orientation="h", y=1.12, x=0))
     e1c.plotly_chart(fig, use_container_width=True)
     figm = go.Figure()
     figm.add_bar(x=[f"{p.year}-{p.month:02d}" for p in mR.index], y=mR.values,
