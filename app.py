@@ -1895,6 +1895,28 @@ def _ib50_cfg_label(cfg):
             f"e{cfg['entry_pct']:g}/s{cfg['sl_pct']:g}/t{cfg['target_pct']:g}{win}")
 
 
+def _confl_concurrency(T):
+    """Per-day PEAK simultaneous open positions, via interval overlap on each
+    trade's [entry_t, exit_t]. Each open trade carries its full 1R of initial
+    risk, so the peak count == peak concurrent risk in R (= % of account at
+    1%/trade). Boundary-inclusive (a trade exiting exactly as another enters is
+    counted as overlapping) → deliberately conservative for a risk readout.
+    Returns a Series of per-day peak counts indexed by normalized date."""
+    peaks = {}
+    for day, g in T.groupby(T["date"].dt.normalize()):
+        ev = []
+        for et, xt in zip(g["entry_t"].to_numpy(float), g["exit_t"].to_numpy(float)):
+            ev.append((et, 1))            # entry opens a position
+            ev.append((xt + 1e-6, -1))    # exit closes it just after (inclusive)
+        ev.sort()
+        cur = mx = 0
+        for _, d in ev:
+            cur += d
+            mx = max(mx, cur)
+        peaks[day] = mx
+    return pd.Series(peaks, dtype=int)
+
+
 def _confl_seg_metrics(sub, start, end):
     """Portfolio metrics (in R) for a trade slice over [start, end)."""
     days = max((pd.Timestamp(end) - pd.Timestamp(start)).days, 1)
@@ -2103,6 +2125,45 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     figm.update_layout(title="Monthly R", height=300, template="plotly_white",
                        margin=dict(t=36, b=10), yaxis_title="R")
     e2c.plotly_chart(figm, use_container_width=True)
+
+    # ── concurrent exposure — does "1% per trade" stay 1%? ───────────────────
+    peaks = _confl_concurrency(T)
+    if not peaks.empty:
+        mxp = int(peaks.max())
+        mxdate = pd.Timestamp(peaks.idxmax()).date()
+        nday = len(peaks)
+        avg_peak = peaks.mean()
+        p95 = int(np.percentile(peaks.to_numpy(), 95))
+        st.markdown("#### ⚠ Concurrent exposure — does “1% per trade” stay 1%?")
+        xc = st.columns(4)
+        xc[0].metric("Peak concurrent risk", f"{mxp}R  (≈{mxp}%)",
+                     help="Most positions open at the same instant on any day. At 1%/trade "
+                          "each open trade risks ~1%, so 3 open = ~3% at risk at once.")
+        xc[1].metric("Days ≥2 open at once", f"{(peaks >= 2).mean()*100:.0f}%")
+        xc[2].metric("Days ≥3 open at once", f"{(peaks >= 3).mean()*100:.0f}%")
+        xc[3].metric("Worst day", f"{mxdate}")
+        vc = peaks.value_counts().sort_index()
+        figc = go.Figure()
+        figc.add_bar(x=[f"{int(k)}R" for k in vc.index], y=vc.values,
+                     marker_color=["#66BB6A", "#FFA726", "#EF5350", "#8E24AA"][:len(vc)]
+                     if len(vc) <= 4 else "#7E57C2",
+                     text=[f"{v/nday*100:.0f}%" for v in vc.values], textposition="outside")
+        figc.update_layout(title="Trading days by peak simultaneous risk",
+                           height=240, template="plotly_white", margin=dict(t=34, b=10),
+                           yaxis_title="days")
+        st.plotly_chart(figc, use_container_width=True)
+        # sizing implication: to cap portfolio risk at 1% you'd divide size by the
+        # concurrency you choose to plan for (worst case mxp, or the 95th pct p95).
+        scale = max(p95, 1)
+        st.caption(
+            f"Each open leg risks its full 1R, so on the busiest days you're risking "
+            f"**~{mxp}% of account at once**, not 1%. Concurrency ≥2 on "
+            f"**{(peaks>=2).mean()*100:.0f}%** of trading days, ≥3 on "
+            f"**{(peaks>=3).mean()*100:.0f}%** (avg peak {avg_peak:.1f}R, 95th-pct {p95}R). "
+            f"To hold a true ~1% *portfolio* peak you'd size each leg at ~**{1/scale*100:.0f}%** "
+            f"(÷{scale}) — which scales the **net R/month down by the same ~{scale}×**. "
+            "That trade-off (full size + occasional 3% days, vs de-risked + ~1% peak) is "
+            "the real sizing decision behind this stack.")
 
     contrib = (T.groupby("cfg").agg(trades=("r", "size"), netR=("r", "sum"),
                                     win=("win", "mean"), avgR=("r", "mean")))
