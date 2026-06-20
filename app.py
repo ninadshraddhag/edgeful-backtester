@@ -43,6 +43,7 @@ FACTS = os.path.join(HERE, "analysis", "facts.csv")
 # (NQ, XAUUSD, …). Re-evaluated every script run, so new uploads appear at once.
 PATHS = data_store.discover()
 
+EXEC_TF = 5    # execution & trade-browser timeframe (minutes) for ORB/IB/CPR modes
 DEFAULT_OPEN_T  = 9 * 60 + 15    # 09:15 (NSE); auto-detected per instrument
 DEFAULT_CLOSE_T = 15 * 60 + 15   # 15:15 square-off — no positions/levels carry overnight
 T_GRID   = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]      # target (× range)
@@ -1833,8 +1834,9 @@ def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
 # 80%→92%; holdout max DD only −21.7R. An exhaustive 102k-combo search (2-,3-,4-leg)
 # could NOT beat this out-of-sample: every train-optimal combo decayed to ~50-70%
 # retention with 30-50R holdout drawdowns (they overload one correlated leg).
-# Diversification > optimization. Gross of costs — slippage trims a couple R/month.
-# Use the Train/Holdout panel and read the caveats before trusting it.
+# Diversification > optimization. Costs are modest here (wide NQ stops, ~1.3
+# contracts/trade): conservative $14 round-turn trims only ~0.7 R/mo → net ~+7.2.
+# Use the Cost-model + Train/Holdout panels and read the caveats before trusting it.
 IB50_SEED_PRESETS = {
     "NQ diversified-3 (~7.8R/mo IS · holds OOS)": [
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, False, True,  True,  "Require Breached",     25, 75,  100)},
@@ -1969,6 +1971,24 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
         st.warning(f"No configs for {instrument}.")
         return
 
+    # ── cost model (commissions + slippage) ──────────────────────────────────
+    # Size = risk / (stop_pts · point_value), so a fixed $/contract cost becomes
+    # cost_R = qty·(comm+slip)/risk — tight-stop configs pay MORE in R. All
+    # metrics below are NET of this. Defaults: conservative round-turn for NQ.
+    _cdef = {"NQ": (4.0, 10.0), "XAUUSD": (5.0, 10.0)}.get(instrument, (4.0, 10.0))
+    with st.expander("💸 Cost model — commissions + slippage (R/month shown is NET)",
+                     expanded=False):
+        st.caption("Per **contract**, **round-turn** (entry + exit combined). NQ: 1 tick = "
+                   "$5, so 2 ticks ≈ $10 slippage. Defaults are deliberately conservative — "
+                   "lower them if your fills/broker are better.")
+        ce = st.columns(3)
+        comm = ce[0].number_input("Commission $/contract (RT)", 0.0, 50.0, _cdef[0], 0.5,
+                                  key="ib50_confl_comm")
+        slip = ce[1].number_input("Slippage $/contract (RT)", 0.0, 100.0, _cdef[1], 0.5,
+                                  key="ib50_confl_slip")
+        apply_costs = ce[2].checkbox("Apply costs", value=True, key="ib50_confl_costs_on")
+    cpc = (comm + slip) if apply_costs else 0.0
+
     # run each component on its own (ib_min-specific) prep, in the date range
     frames, monthly = [], {}
     for i, c in enumerate(cur, 1):
@@ -1979,6 +1999,11 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
         if tr.empty:
             continue
         tr = tr.copy(); tr["cfg"] = f"#{i}"
+        # convert the per-contract $ cost into R, subtract from every trade
+        cost_r = (tr["qty"] * cpc / tr["risk_usd"]).to_numpy() if cpc > 0 else 0.0
+        tr["r_gross"] = tr["r"]
+        tr["r"] = tr["r"] - cost_r
+        tr["pnl"] = tr["pnl"] - (tr["qty"] * cpc)
         frames.append(tr)
         monthly[f"#{i}"] = tr.set_index("date")["r"].resample("ME").sum()
     if not frames:
@@ -1987,6 +2012,7 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     T = pd.concat(frames).sort_values(["date", "entry_t"]).reset_index(drop=True)
 
     r = T["r"].to_numpy()
+    gross_r = T["r_gross"].to_numpy()
     span_days = max((pd.Timestamp(d1) - pd.Timestamp(d0)).days, 1)
     n_months = span_days / 30.44
     n_weeks = span_days / 7.0
@@ -2010,6 +2036,16 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     k2[3].metric("Green months", f"{(mR>0).mean()*100:.0f}%")
     k2[4].metric("Worst month", f"{mR.min():+.1f}R")
     k2[5].metric("Median month", f"{mR.median():+.2f}R")
+
+    if cpc > 0:
+        drag = (gross_r.sum() - r.sum()) / n_months
+        st.caption(f"💸 Costs applied: gross **{gross_r.sum()/n_months:+.2f} R/mo** → "
+                   f"net **{r.sum()/n_months:+.2f} R/mo**  (drag **−{drag:.2f} R/mo**, "
+                   f"≈ ${comm+slip:.0f}/contract round-turn × {len(T)/n_months:.0f} trades/mo). "
+                   "Tighter-stop configs pay proportionally more.")
+    else:
+        st.caption("💸 Costs **off** — figures above are gross. Enable in the cost-model "
+                   "expander to see net R/month.")
 
     # ── train / holdout (out-of-sample) validation ───────────────────────────
     st.markdown("#### 🔬 Train / Holdout validation — does the edge survive "
