@@ -1826,6 +1826,19 @@ def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
                 eff_min=960, allow_reentry=False)
 
 
+def _ib50_seed_cfg2(ib_min, open_t, close_t, entry_end, uc, uv, ub, bmode, e, s, t,
+                    point_value=20.0):
+    """Flexible seed builder: arbitrary session window + entry cutoff + hard close.
+    Used by the London / NY gold and 09:30-12:00 NQ presets."""
+    return dict(ib_min=ib_min, open_t=open_t, close_t=close_t,
+                use_formation=False, use_closeloc=uc, close_loc_pct=50.0, use_vwap=uv,
+                logic="AND", use_breach=ub, breach_mode=bmode, breach_scope="Directional",
+                entry_pct=float(e), sl_pct=float(s), target_pct=float(t),
+                risk_usd=1500.0, point_value=point_value, use_entry_window=True,
+                entry_start_t=open_t, entry_end_t=entry_end, use_exit_time=False,
+                exit_t=close_t, eff_min=close_t, allow_reentry=False)
+
+
 # Built-in NQ stack: 3 LOW-CORRELATION configs (avg corr ~0.11) across different IB
 # durations / filter families / breach modes. FULL +7.6 R/month (280R / 37 calendar
 # months ≈ 7.6% at 1% risk; the tab's span/30.44 shows ~7.9). Train (pre-2025)
@@ -1837,10 +1850,38 @@ def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
 # contracts/trade): conservative $14 round-turn trims only ~0.7 R/mo → net ~+7.2.
 # Use the Cost-model + Train/Holdout panels and read the caveats before trusting it.
 IB50_SEED_PRESETS = {
-    "NQ diversified-3 (~7.8R/mo IS · holds OOS)": [
+    "NQ diversified-3 (full session, ~7.8R/mo)": [
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, False, True,  True,  "Require Breached",     25, 75,  100)},
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(60, False, True,  False, False, "Require Not-Breached", 25, 75,  150)},
         {"instrument": "NQ", "cfg": _ib50_seed_cfg(30, False, True,  False, True,  "Require Breached",     25, 100, 75)},
+    ],
+    # NQ 09:30-12:00 variant (entries to 11:30, hard close 12:00): +5.8R/mo, holds OOS
+    "★ NQ Diversified-3 (09:30-12:00, ~5.8R/mo)": [
+        {"instrument": "NQ", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  True,  "Require Breached",     25, 75,  100)},
+        {"instrument": "NQ", "cfg": _ib50_seed_cfg2(60, 570, 720, 690, True,  False, False, "Require Not-Breached", 25, 75,  150)},
+        {"instrument": "NQ", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  False, True,  "Require Breached",     25, 100, 75)},
+    ],
+    # Gold NY morning (09:30-12:00 ET): +8.7R/mo full, +8.2 OOS, 85% green, corr 0.28
+    "★ Gold NY (09:30-12:00, ~8.7R/mo)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True, "Require Breached", 25, 75,  100, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True, "Require Breached", 25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  True, "Require Breached", 25, 100, 150, 100.0)},
+    ],
+    # Gold London open (03:00-07:00 ET = London 08:00-12:00): +8.0R/mo, +8.0 OOS, corr 0.20
+    "★ Gold London (03:00-07:00 ET, ~8.0R/mo)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, True,  True,  True, "Require Breached", 25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True, "Require Breached", 25, 100, 100, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  False, True, "Require Breached", 25, 100, 150, 100.0)},
+    ],
+    # Gold London+NY cross-session 6-leg: +16.7R/mo (sessions don't overlap → peak
+    # concurrency stays 3); London<->NY monthly corr ~0.00; 92% green months, +16.2 OOS
+    "★ Gold London+NY 6-leg (cross-session, ~16.7R/mo)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, True,  True,  True, "Require Breached", 25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True, "Require Breached", 25, 100, 100, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  False, True, "Require Breached", 25, 100, 150, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True, "Require Breached", 25, 75,  100, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True, "Require Breached", 25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  True, "Require Breached", 25, 100, 150, 100.0)},
     ],
 }
 
@@ -2179,6 +2220,36 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
         mdf = pd.DataFrame(monthly).fillna(0.0)
         st.markdown("**Monthly-R correlation** (lower = more diversification → smoother curve)")
         st.dataframe(mdf.corr().round(2), use_container_width=True)
+
+    # ── trade browser (per-trade chart; each trade uses its OWN session/IB) ───
+    st.markdown("**🔍 Trade browser** — inspect any individual trade on its chart")
+    legs = ["(all legs)"] + [f"#{i}" for i in range(1, len(cur) + 1)]
+    bc = st.columns([1, 3])
+    pick = bc[0].selectbox("Leg", legs, key="ib50_confl_tb_leg",
+                           format_func=lambda x: x if x == "(all legs)"
+                           else f"{x}  {cmap.get(x, '')[:34]}")
+    tsrc = (T if pick == "(all legs)" else T[T["cfg"] == pick]).reset_index(drop=True)
+    if tsrc.empty:
+        st.info("No trades for this leg in range.")
+    else:
+        labels = [f"{r['cfg']} · {r['date']:%d %b %Y} {hhmm(r['entry_t'])} · "
+                  f"{r['direction'].upper()} · {r['outcome']} · {r['r']:+.2f}R"
+                  for _, r in tsrc.iterrows()]
+        sel = bc[1].selectbox("Trade", range(len(tsrc)), format_func=lambda i: labels[i],
+                              key="ib50_confl_tb")
+        tr = tsrc.iloc[sel]
+        comp = cur[int(str(tr["cfg"]).lstrip("#")) - 1]["cfg"]
+        o_t, c_t, ibm = comp["open_t"], comp["close_t"], comp["ib_min"]
+        mdf = load_min(mpath, mtime)
+        dd = mdf[(mdf["date_only"] == pd.Timestamp(tr["date"]).date())
+                 & (mdf["t_min"] >= o_t) & (mdf["t_min"] <= c_t)]
+        if dd.empty:
+            st.info("No minute data for this trade's day.")
+        else:
+            _ib50_day_chart(dd, tr, o_t, ibm)
+            st.caption(f"{tr['cfg']} · IB{ibm} · session {hhmm(o_t)}–{hhmm(c_t)} ET · "
+                       "shaded box = IB · amber = session VWAP · grey dotted = entry · "
+                       "red dashed = stop · green dashed = target · ▲/▼ entry · ✕ exit.")
 
     st.download_button("⬇ Download portfolio trades (CSV)",
                        T[["cfg", "date", "dow", "direction", "entry", "stop", "target",
