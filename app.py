@@ -1756,6 +1756,18 @@ def prep_ib50(instrument, mpath, mtime, open_t, close_t, ib_min):
     return ib50.prep_days(load_min(mpath, mtime), open_t, close_t, ib_min)
 
 
+@st.cache_data(show_spinner=False)
+def _ib50_run_cached(instrument, mpath, mtime, cfg_json, d0, d1):
+    """Cached GROSS run of one config over [d0,d1]. Confluence reruns on every
+    widget click (calendar, cost inputs, browser) — caching this means the heavy
+    bar-by-bar sim runs once per (config, date-range), not on every interaction.
+    Costs are applied by the caller AFTER this, so cost edits stay instant."""
+    cfg = json.loads(cfg_json)
+    prep = prep_ib50(instrument, mpath, mtime, cfg["open_t"], cfg["close_t"], cfg["ib_min"])
+    prep = [r for r in prep if d0 <= r["date"].date() <= d1]
+    return ib50.run(prep, cfg)
+
+
 def _session_vwap_day(dd):
     """Session VWAP for one day's session slice (anchored at its first bar) —
     the same formula ib50.prep_days uses, for the trade-browser overlay."""
@@ -2137,9 +2149,8 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     frames, monthly = [], {}
     for i, c in enumerate(cur, 1):
         cfg = c["cfg"]
-        prep = prep_ib50(instrument, mpath, mtime, cfg["open_t"], cfg["close_t"], cfg["ib_min"])
-        prep = [r for r in prep if d0 <= r["date"].date() <= d1]
-        tr = ib50.run(prep, cfg)
+        tr = _ib50_run_cached(instrument, mpath, mtime,
+                              json.dumps(cfg, sort_keys=True), d0, d1)
         if tr.empty:
             continue
         tr = tr.copy(); tr["cfg"] = f"#{i}"
@@ -2330,7 +2341,8 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     pick = bc[0].selectbox("Leg", legs, key="ib50_confl_tb_leg",
                            format_func=lambda x: x if x == "(all legs)"
                            else f"{x}  {cmap.get(x, '')[:34]}")
-    tsrc = (T if pick == "(all legs)" else T[T["cfg"] == pick]).reset_index(drop=True)
+    tsrc = (T if pick == "(all legs)" else T[T["cfg"] == pick])
+    tsrc = tsrc.sort_values("date").tail(400).reset_index(drop=True)  # cap dropdown size
     if tsrc.empty:
         st.info("No trades for this leg in range.")
     else:
