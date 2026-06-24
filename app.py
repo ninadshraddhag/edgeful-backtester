@@ -19,7 +19,7 @@ guard, to surface the highest-probability configurations.
 Data:  C:\\NIFTY 50_minute.csv , C:\\NIFTY BANK_minute.csv  (auto-loaded)
        analysis/facts.csv  (build_facts.py) — for the day classifications
 """
-import os, itertools, json
+import os, itertools, json, calendar
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -1981,6 +1981,64 @@ def _confl_concurrency(T):
     return pd.Series(peaks, dtype=int)
 
 
+def _pl_calendar_html(daily, year, month, unit="$"):
+    """Tradezella-style monthly P/L calendar. `daily` is a dict
+    date -> (pnl, r, n_trades). Renders day cells (green/red) + a weekly-total
+    column + a month header. Inline styles only (survives Streamlit sanitising)."""
+    weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(year, month)
+    def fmt(v):
+        return (f"+${v:,.2f}" if v >= 0 else f"-${abs(v):,.2f}") if unit == "$" \
+            else (f"{v:+.2f}R")
+    def colors(pnl, has):
+        if not has:
+            return "#0c0f15", "#39414f", "#39414f"      # bg, num, txt (empty)
+        if pnl > 0:
+            return "#0c2a1c", "#9fb0c2", "#2ec27e"
+        if pnl < 0:
+            return "#2a1116", "#9fb0c2", "#f6465d"
+        return "#161b24", "#9fb0c2", "#8a94a6"
+    # month totals
+    m_pnl = sum(v[0] for d, v in daily.items() if d.year == year and d.month == month)
+    m_r = sum(v[1] for d, v in daily.items() if d.year == year and d.month == month)
+    m_n = sum(v[2] for d, v in daily.items() if d.year == year and d.month == month)
+    head = (f"<div style='font-size:15px;font-weight:700;color:#e6edf3;margin:0 0 8px'>"
+            f"{calendar.month_name[month]} {year} &nbsp;·&nbsp; "
+            f"<span style='color:{'#2ec27e' if m_pnl>=0 else '#f6465d'}'>{fmt(m_pnl)}</span>"
+            f" &nbsp;<span style='color:#8a94a6;font-weight:400'>({m_r:+.1f}R · {m_n} trades)"
+            f"</span></div>")
+    th = "padding:6px 4px;color:#8a94a6;font-size:11px;font-weight:600;text-align:center"
+    rows = ("<tr><th style='" + th + ";text-align:left'>Mon</th>"
+            + "".join(f"<th style='{th}'>{d}</th>" for d in
+                      ["Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+            + f"<th style='{th};color:#5b8cff'>Week</th></tr>")
+    for wi, wk in enumerate(weeks, 1):
+        cells = ""
+        w_pnl = w_r = w_n = 0.0
+        for d in wk:
+            inm = (d.month == month and d.year == year)
+            pnl, rr, n = daily.get(d, (0.0, 0.0, 0))
+            if inm:
+                w_pnl += pnl; w_r += rr; w_n += n
+            has = inm and n > 0
+            bg, numc, txtc = colors(pnl if inm else 0.0, has)
+            body = (f"<div style='font-weight:700;font-size:13px;color:{txtc}'>{fmt(pnl)}</div>"
+                    f"<div style='font-size:10px;color:#7d8796'>{n} trade{'s' if n!=1 else ''}</div>"
+                    if has else "")
+            num = f"<div style='font-size:11px;color:{numc};text-align:left'>{d.day}</div>"
+            cells += (f"<td style='background:{bg};border:1px solid #1c2230;height:70px;"
+                      f"width:12%;vertical-align:top;padding:4px 6px'>{num}"
+                      f"<div style='text-align:center;margin-top:6px'>{body}</div></td>")
+        wc = "#2ec27e" if w_pnl > 0 else "#f6465d" if w_pnl < 0 else "#8a94a6"
+        wk_cell = (f"<td style='background:#0f1320;border:1px solid #1c2230;height:70px;"
+                   f"vertical-align:middle;text-align:center;padding:4px'>"
+                   f"<div style='font-size:10px;color:#5b8cff;font-weight:600'>Week {wi}</div>"
+                   f"<div style='font-weight:700;font-size:12px;color:{wc};margin-top:3px'>{fmt(w_pnl)}</div>"
+                   f"<div style='font-size:10px;color:#7d8796'>{w_n} trades</div></td>")
+        rows += f"<tr>{cells}{wk_cell}</tr>"
+    return (head + "<table style='width:100%;border-collapse:collapse;table-layout:fixed'>"
+            + rows + "</table>")
+
+
 def _confl_seg_metrics(sub, start, end):
     """Portfolio metrics (in R) for a trade slice over [start, end)."""
     days = max((pd.Timestamp(end) - pd.Timestamp(start)).days, 1)
@@ -2189,6 +2247,26 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
     figm.update_layout(title="Monthly R", height=300, template="plotly_white",
                        margin=dict(t=36, b=10), yaxis_title="R")
     e2c.plotly_chart(figm, use_container_width=True)
+
+    # ── monthly P/L calendar (day-by-day + weekly + monthly totals) ──────────
+    st.markdown("#### 📅 Monthly P/L calendar")
+    dgrp = T.assign(d=T["date"].dt.date).groupby("d")
+    daily = {d: (float(g["pnl"].sum()), float(g["r"].sum()), int(len(g)))
+             for d, g in dgrp}
+    months = sorted({(d.year, d.month) for d in daily}, reverse=True)
+    if months:
+        cc = st.columns([1, 1, 2])
+        yrs = sorted({y for y, _ in months}, reverse=True)
+        ysel = cc[0].selectbox("Year", yrs, key="ib50_cal_year")
+        mopts = sorted({m for y, m in months if y == ysel}, reverse=True)
+        msel = cc[1].selectbox("Month", mopts, key="ib50_cal_month",
+                               format_func=lambda m: calendar.month_name[m])
+        unit = cc[2].radio("Show", ["$", "R"], horizontal=True, key="ib50_cal_unit")
+        st.markdown(_pl_calendar_html(daily, ysel, msel, unit),
+                    unsafe_allow_html=True)
+        st.caption(f"Green = up day · red = down day · right column = weekly totals · "
+                   f"header = month total. P/L is **net of costs**, 1R = "
+                   f"${T['risk_usd'].iloc[0]:,.0f}.")
 
     # ── concurrent exposure — does "1% per trade" stay 1%? ───────────────────
     peaks = _confl_concurrency(T)
