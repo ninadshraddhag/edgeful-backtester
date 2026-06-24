@@ -176,11 +176,17 @@ def sim_day(rec, cfg) -> list:
     # realism guard: require the breach to be confirmed on a PRIOR (closed) bar, so
     # the breakout candle and the retrace-entry candle can't be the same 1-min bar.
     bprior = cfg.get("breach_confirm_prior", False)
+    # exit controls (all default to the original behaviour):
+    be_at = cfg.get("be_at", 0.0)              # breakeven: move stop to entry once the
+    #                                            trade is +be_at·R in favour (0 = off)
+    vwap_exit_on = cfg.get("vwap_exit", True)  # allow disabling the 5-min VWAP-close exit
+    vwap_buf = cfg.get("vwap_buffer", 0.0)     # require the close this many R beyond VWAP
 
     traded = False
     pos = 0
     e_px = s_px = t_px = qty = np.nan
     e_i = 0
+    be_armed = False
     trades = []
 
     for i in range(n):
@@ -205,26 +211,29 @@ def sim_day(rec, cfg) -> list:
                         and lo <= eP <= hi:
                     pos, e_px, s_px, t_px, e_i = 1, eP, sP, tP, i
                     qty = risk / (max(abs(eP - sP), 1e-9) * pvval)
-                    traded = True
+                    traded, be_armed = True, False
             elif bias == -1:
                 eP, sP, tP = ib_low + entry * rng, ib_low + sl * rng, ib_low - target * rng
                 if sP > eP and tP < eP and _breach_ok(False, cfg, hbi, lbi) \
                         and lo <= eP <= hi:
                     pos, e_px, s_px, t_px, e_i = -1, eP, sP, tP, i
                     qty = risk / (max(abs(eP - sP), 1e-9) * pvval)
-                    traded = True
+                    traded, be_armed = True, False
 
         # ── exit (only when in position; may be the same bar as entry) ───────
         if pos != 0:
             longp = pos == 1
-            hit_sl = (lo <= s_px) if longp else (hi >= s_px)
+            sd = abs(e_px - s_px)                       # original stop distance (R unit)
+            eff_stop = e_px if be_armed else s_px       # active stop (breakeven once armed)
+            hit_sl = (lo <= eff_stop) if longp else (hi >= eff_stop)
             hit_tp = (hi >= t_px) if longp else (lo <= t_px)
-            # VWAP-close exit: only at a 5-min close, vs the 5-min VWAP
-            vwap_exit = (use_vwap and is5[i] and (not np.isnan(pv5[i]))
-                         and (cl < pv5[i] if longp else cl > pv5[i]))
+            # VWAP-close exit: only at a 5-min close, vs the 5-min VWAP (+ optional buffer)
+            vwap_exit = (use_vwap and vwap_exit_on and is5[i] and (not np.isnan(pv5[i]))
+                         and (cl < pv5[i] - vwap_buf * sd if longp
+                              else cl > pv5[i] + vwap_buf * sd))
             eod = tm >= eff_min
             if hit_sl:
-                exit_px, reason = s_px, "SL"
+                exit_px, reason = eff_stop, ("BE" if be_armed else "SL")
             elif hit_tp:
                 exit_px, reason = t_px, "TP"
             elif vwap_exit:
@@ -237,6 +246,10 @@ def sim_day(rec, cfg) -> list:
                 trades.append(_mk_trade(rec, pos, e_px, s_px, t_px, exit_px, reason,
                                         qty, risk, pt[e_i], pt[i]))
                 pos = 0
+            elif be_at > 0 and not be_armed:            # arm breakeven from the NEXT bar
+                fav = (hi - e_px) if longp else (e_px - lo)
+                if fav >= be_at * sd:
+                    be_armed = True
 
     # leftover open position → square off at the last available close
     if pos != 0:
