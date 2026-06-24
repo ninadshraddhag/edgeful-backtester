@@ -173,6 +173,9 @@ def sim_day(rec, cfg) -> list:
     use_vwap, logic = cfg["use_vwap"], cfg["logic"]
     reentry = cfg["allow_reentry"]
     hb, lb = rec["hb"], rec["lb"]                  # precomputed cumulative breach state
+    # realism guard: require the breach to be confirmed on a PRIOR (closed) bar, so
+    # the breakout candle and the retrace-entry candle can't be the same 1-min bar.
+    bprior = cfg.get("breach_confirm_prior", False)
 
     traded = False
     pos = 0
@@ -183,20 +186,29 @@ def sim_day(rec, cfg) -> list:
     for i in range(n):
         hi, lo, cl, vw, tm = ph[i], pl[i], pc[i], pv[i], int(pt[i])
 
+        # breach state for THIS bar's entry: current-bar-inclusive (default) or, with
+        # the realism guard, as-of the previous closed bar (so the entry can't fill on
+        # the same candle that first pierced the IB).
+        if bprior:
+            hbi = hb[i - 1] if i > 0 else False
+            lbi = lb[i - 1] if i > 0 else False
+        else:
+            hbi, lbi = hb[i], lb[i]
+
         # ── entry (only when flat) ───────────────────────────────────────────
         if pos == 0 and (reentry or not traded) and tm < eff_min and \
                 (not ew or (e0 <= tm <= e1)):
             bias = _bias_at(f_side, c_vote, n_enabled, use_vwap, logic, cl, vw)
             if bias == 1:
                 eP, sP, tP = ib_high - entry * rng, ib_high - sl * rng, ib_high + target * rng
-                if sP < eP and tP > eP and _breach_ok(True, cfg, hb[i], lb[i]) \
+                if sP < eP and tP > eP and _breach_ok(True, cfg, hbi, lbi) \
                         and lo <= eP <= hi:
                     pos, e_px, s_px, t_px, e_i = 1, eP, sP, tP, i
                     qty = risk / (max(abs(eP - sP), 1e-9) * pvval)
                     traded = True
             elif bias == -1:
                 eP, sP, tP = ib_low + entry * rng, ib_low + sl * rng, ib_low - target * rng
-                if sP > eP and tP < eP and _breach_ok(False, cfg, hb[i], lb[i]) \
+                if sP > eP and tP < eP and _breach_ok(False, cfg, hbi, lbi) \
                         and lo <= eP <= hi:
                     pos, e_px, s_px, t_px, e_i = -1, eP, sP, tP, i
                     qty = risk / (max(abs(eP - sP), 1e-9) * pvval)
