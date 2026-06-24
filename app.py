@@ -1863,12 +1863,13 @@ def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
 
 
 def _ib50_seed_cfg2(ib_min, open_t, close_t, entry_end, uc, uv, ub, bmode, e, s, t,
-                    point_value=20.0):
+                    point_value=20.0, uf=False):
     """Flexible seed builder: arbitrary session window + entry cutoff + hard close.
     REALISTIC fills (breach_confirm_prior) so a single candle can't both break the IB
-    and fill the retrace entry. Used by all gold/NQ presets."""
+    and fill the retrace entry. `uf` = formation filter (low-first/high-first) — it
+    helps at the London open. Used by all gold/NQ presets."""
     return dict(ib_min=ib_min, open_t=open_t, close_t=close_t,
-                use_formation=False, use_closeloc=uc, close_loc_pct=50.0, use_vwap=uv,
+                use_formation=uf, use_closeloc=uc, close_loc_pct=50.0, use_vwap=uv,
                 logic="AND", use_breach=ub, breach_mode=bmode, breach_scope="Directional",
                 entry_pct=float(e), sl_pct=float(s), target_pct=float(t),
                 risk_usd=1500.0, point_value=point_value, use_entry_window=True,
@@ -1883,12 +1884,14 @@ def _ib50_seed_cfg2(ib_min, open_t, close_t, entry_end, uc, uv, ub, bmode, e, s,
 # fills. Realistic configs lean on no-breach / fade legs (the breakout legs were the
 # ones gaming the same-candle fill). All hold out-of-sample (2024+ / 2025).
 IB50_SEED_PRESETS = {
-    # Gold cross-session 6-leg: FULL +8.7 R/mo, OOS +7.1 (82%), 74% green, DD −34R,
-    # acc 31% / RR 2.80. Sessions don't overlap → peak concurrency stays 3.
-    "★ Gold London+NY 6-leg (realistic, ~8.7R/mo)": [
-        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0)},
+    # Gold cross-session 6-leg: FULL +9.3 R/mo, OOS +7.9 (84%), 79% green, DD −26.5R,
+    # acc 32% / RR 2.83. London block uses a FORMATION+VWAP leg (formation helps at the
+    # London open — it cut combined DD from −34R to −26.5R). Sessions don't overlap →
+    # peak concurrency stays 3.
+    "★ Gold London+NY 6-leg (realistic, ~9.3R/mo)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0)},
-        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, True,  True,  True,  "Require Not-Breached", 25, 75,  75,  100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  False, "Require Breached",     25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0)},
@@ -1899,11 +1902,11 @@ IB50_SEED_PRESETS = {
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0)},
     ],
-    # Gold London only: FULL +3.8 R/mo, OOS +3.0 (75%), corr 0.27
-    "★ Gold London (realistic, ~3.8R/mo)": [
-        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0)},
+    # Gold London only (with formation+VWAP leg): FULL +4.4 R/mo, OOS +3.8 (82%), DD −26R
+    "★ Gold London (realistic, ~4.4R/mo)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0)},
-        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, True,  True,  True,  "Require Not-Breached", 25, 75,  75,  100.0)},
     ],
     # NQ 09:30-12:00: FULL +3.9 R/mo, OOS +2.5 (55% retention — weaker), DD −19R
     "★ NQ 3-leg (realistic, ~3.9R/mo)": [
