@@ -381,12 +381,32 @@ def _clean_layout(fig, height=480, title=None):
                    zeroline=False, showline=False))
 
 
+def _chart_tf(day_df, open_t, tf=5):
+    """Aggregate a 1-min day slice to tf-min candles for a CLEAN trade-browser
+    VIEW only. Execution, levels and entry/exit markers stay 1-min — this only
+    changes the candles drawn. Buckets are anchored at the session open so they
+    line up with the IB. Returns the input unchanged if it's too small."""
+    if day_df is None or len(day_df) <= tf or "t_min" not in day_df.columns:
+        return day_df
+    g = (day_df["t_min"].to_numpy() - int(open_t)) // tf
+    agg = {"date": ("date", "first"), "open": ("open", "first"),
+           "high": ("high", "max"), "low": ("low", "min"),
+           "close": ("close", "last"), "t_min": ("t_min", "first")}
+    if "volume" in day_df.columns:
+        agg["volume"] = ("volume", "sum")
+    out = day_df.groupby(g, sort=True).agg(**agg).reset_index(drop=True)
+    if "date_only" in day_df.columns:
+        out["date_only"] = day_df["date_only"].iloc[0]
+    return out
+
+
 def _edge_day_chart(day_df, tr, open_t, end_t):
     """One trade drawn on its day's minute chart — clean candles, OR box, TP/SL."""
     day = pd.Timestamp(tr["date"])
-    x = day_df["date"]
+    cdf = _chart_tf(day_df, open_t)
+    x = cdf["date"]
     fig = go.Figure()
-    _clean_candles(fig, x, day_df)
+    _clean_candles(fig, x, cdf)
     # opening-range box (ORB/IB window) — subtle
     fig.add_shape(type="rect",
                   x0=day + pd.Timedelta(minutes=open_t), x1=day + pd.Timedelta(minutes=end_t),
@@ -433,7 +453,8 @@ def _edge_trade_browser(trades, mpath, mtime, open_t, end_t, close_t, key):
         st.info("No minute data for this trade's day.")
         return
     _edge_day_chart(dd, tr, open_t, end_t)
-    st.caption("Shaded box = ORB/IB window · green dashed = target · red dashed = stop · "
+    st.caption("Candles shown on **5-min** for a clean view (execution stays 1-min). "
+               "Shaded box = ORB/IB window · green dashed = target · red dashed = stop · "
                "▲/▼ entry · ✕ exit.")
 
 
@@ -1224,11 +1245,12 @@ def _dw_day_chart(day_df, tr, open_t, ib_min, vwap=None):
     """One day-wise trade on its day's minute chart: IB box, entry/stop/TP1/TP2
     levels and entry/exit markers. `vwap` (optional) overlays session VWAP."""
     day = pd.Timestamp(tr["date"])
-    x = day_df["date"]
+    cdf = _chart_tf(day_df, open_t)
+    x = cdf["date"]
     fig = go.Figure()
-    _clean_candles(fig, x, day_df)
+    _clean_candles(fig, x, cdf)
     if vwap is not None:
-        fig.add_scatter(x=x, y=vwap, mode="lines", name="VWAP",
+        fig.add_scatter(x=x, y=_session_vwap_day(cdf), mode="lines", name="VWAP",
                         line=dict(width=1.4, color="#FFB300"),
                         hoverinfo="skip", showlegend=False)
     # IB box — subtle
@@ -1406,9 +1428,10 @@ def _live_sample_day_chart(day_df, row, open_t, ib_min, close_t):
     """One matched day's session as clean candlesticks: IB box, IB high/low,
     PDH/PDL, with a descriptive title."""
     day = pd.Timestamp(row["date"])
-    x = day_df["date"]
+    cdf = _chart_tf(day_df, open_t)
+    x = cdf["date"]
     fig = go.Figure()
-    _clean_candles(fig, x, day_df)
+    _clean_candles(fig, x, cdf)
     # IB window box
     ib_x0 = day + pd.Timedelta(minutes=open_t)
     ib_x1 = day + pd.Timedelta(minutes=open_t + ib_min - 1)
@@ -1747,10 +1770,11 @@ def _session_vwap_day(dd):
 def _ib50_day_chart(dd, tr, open_t, ib_min):
     """Clean candlestick of one IB50 trade: IB box, VWAP, entry/stop/target."""
     day = pd.Timestamp(tr["date"])
-    x = dd["date"]
+    cdf = _chart_tf(dd, open_t)
+    x = cdf["date"]
     fig = go.Figure()
-    _clean_candles(fig, x, dd)
-    fig.add_scatter(x=x, y=_session_vwap_day(dd), mode="lines", name="VWAP",
+    _clean_candles(fig, x, cdf)
+    fig.add_scatter(x=x, y=_session_vwap_day(cdf), mode="lines", name="VWAP",
                     line=dict(width=1.4, color="#FFB300"), hoverinfo="skip",
                     showlegend=False)
     # IB box
@@ -1802,9 +1826,9 @@ def _ib50_trade_browser(trades, mpath, mtime, open_t, close_t, ib_min):
         st.info("No minute data for this trade's day.")
         return
     _ib50_day_chart(dd, tr, open_t, ib_min)
-    st.caption("Shaded box = IB · amber = session VWAP (exit uses 5-min VWAP) · grey "
-               "dotted = entry · red dashed = stop · green dashed = target · ▲/▼ entry · "
-               "✕ exit.")
+    st.caption("Candles shown on **5-min** for a clean view (execution stays 1-min). "
+               "Shaded box = IB · amber = session VWAP · grey dotted = entry · red dashed "
+               "= stop · green dashed = target · ▲/▼ entry · ✕ exit.")
 
 
 IB50_LOG_COLS = ["date", "dow", "direction", "entry time", "exit time", "entry",
@@ -2248,8 +2272,9 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
         else:
             _ib50_day_chart(dd, tr, o_t, ibm)
             st.caption(f"{tr['cfg']} · IB{ibm} · session {hhmm(o_t)}–{hhmm(c_t)} ET · "
-                       "shaded box = IB · amber = session VWAP · grey dotted = entry · "
-                       "red dashed = stop · green dashed = target · ▲/▼ entry · ✕ exit.")
+                       "candles **5-min** (execution 1-min) · shaded box = IB · amber = "
+                       "VWAP · grey dotted = entry · red dashed = stop · green dashed = "
+                       "target · ▲/▼ entry · ✕ exit.")
 
     st.download_button("⬇ Download portfolio trades (CSV)",
                        T[["cfg", "date", "dow", "direction", "entry", "stop", "target",
