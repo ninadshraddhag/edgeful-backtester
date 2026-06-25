@@ -1863,11 +1863,12 @@ def _ib50_seed_cfg(ib_min, uf, uc, uv, ub, bmode, e, s, t):
 
 
 def _ib50_seed_cfg2(ib_min, open_t, close_t, entry_end, uc, uv, ub, bmode, e, s, t,
-                    point_value=20.0, uf=False):
+                    point_value=20.0, uf=False, vex=True):
     """Flexible seed builder: arbitrary session window + entry cutoff + hard close.
     REALISTIC fills (breach_confirm_prior) so a single candle can't both break the IB
-    and fill the retrace entry. `uf` = formation filter (low-first/high-first) — it
-    helps at the London open. Used by all gold/NQ presets."""
+    and fill the retrace entry. `uf` = formation filter (low-first/high-first; helps at
+    the London open). `vex` = VWAP-close exit (False = let trades run to TP/session
+    close — higher net + accuracy, fewer long losing streaks). Used by all presets."""
     return dict(ib_min=ib_min, open_t=open_t, close_t=close_t,
                 use_formation=uf, use_closeloc=uc, close_loc_pct=50.0, use_vwap=uv,
                 logic="AND", use_breach=ub, breach_mode=bmode, breach_scope="Directional",
@@ -1875,7 +1876,7 @@ def _ib50_seed_cfg2(ib_min, open_t, close_t, entry_end, uc, uv, ub, bmode, e, s,
                 risk_usd=1500.0, point_value=point_value, use_entry_window=True,
                 entry_start_t=open_t, entry_end_t=entry_end, use_exit_time=False,
                 exit_t=close_t, eff_min=close_t, allow_reentry=False,
-                breach_confirm_prior=True)
+                breach_confirm_prior=True, vwap_exit=vex)
 
 
 # REALISTIC-FILLS presets (breach_confirm_prior on): re-optimised so a single 1-min
@@ -1895,6 +1896,17 @@ IB50_SEED_PRESETS = {
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  False, "Require Breached",     25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0)},
+    ],
+    # Same 6 legs, VWAP-close exit OFF (trades run to TP / session close): gross +10.7,
+    # acc 43% (vs 32%), max losing streak 18 (vs 30), DD −37R — higher net, fewer
+    # gut-punch streaks, at a slightly deeper drawdown. Compare against the ON version.
+    "★ Gold London+NY 6-leg · VWAP-exit OFF (~10.7R/mo)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0, vex=False)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True, vex=False)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0, vex=False)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  False, "Require Breached",     25, 100, 100, 100.0, vex=False)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0, vex=False)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0, vex=False)},
     ],
     # Gold NY only: FULL +4.9 R/mo, OOS +4.1 (80%), corr 0.35
     "★ Gold NY (realistic, ~4.9R/mo)": [
