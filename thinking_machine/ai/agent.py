@@ -1,0 +1,334 @@
+"""The Thinking Machine's reasoning layer.
+
+This module is deliberately LLM-free so the platform runs fully offline and
+deterministically.  It does three jobs:
+
+1. ``parse_idea``  - translate a plain-English idea into a ``StrategySpec``.
+2. ``write_strategy`` / ``load_spec`` - serialise that spec to a runnable
+   ``strategies/current_strategy.py`` and read it back (the "code" round-trip).
+3. ``analyze_performance`` + ``suggest_improvement`` - read the backtest metrics
+   and act like a quant researcher: explain *why* it behaved as it did and
+   propose ONE concrete, mechanical change to the spec.
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+import re
+from dataclasses import replace
+
+from core.strategy import StrategySpec
+
+_STRAT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "strategies")
+_STRAT_FILE = os.path.join(_STRAT_DIR, "current_strategy.py")
+
+
+# --------------------------------------------------------------------------- #
+# 1. Idea  ->  StrategySpec
+# --------------------------------------------------------------------------- #
+def parse_idea(text: str) -> StrategySpec:
+    """Map keywords in a trading idea to concrete entry signals + risk model."""
+    t = text.lower()
+    long_sig: list[str] = []
+    short_sig: list[str] = []
+
+    wants_fvg = bool(re.search(r"fair value gap|fvg|imbalance", t))
+    wants_ob = bool(re.search(r"order block|\bob\b", t))
+    wants_sweep = bool(re.search(r"sweep|stop hunt|liquidity|raid", t))
+    wants_ema = bool(re.search(r"\bema\b|moving average|trend filter", t))
+    reversion = bool(re.search(r"revers|fade|mean reversion|snap back", t))
+
+    bias_long = bool(re.search(r"\blong\b|\bbuy\b|bullish|dip", t))
+    bias_short = bool(re.search(r"\bshort\b|\bsell\b|bearish|rally", t))
+    both = (bias_long and bias_short) or (not bias_long and not bias_short)
+
+    # Liquidity sweeps are inherently a reversion play (buy the swept low).
+    if wants_sweep:
+        if bias_long or both:
+            long_sig.append("sweep_low")
+        if bias_short or both:
+            short_sig.append("sweep_high")
+
+    if wants_fvg:
+        if bias_long or both:
+            long_sig.append("fvg_bull")
+        if bias_short or both:
+            short_sig.append("fvg_bear")
+
+    if wants_ob:
+        if bias_long or both:
+            long_sig.append("ob_bull")
+        if bias_short or both:
+            short_sig.append("ob_bear")
+
+    # EMA used as a trend *filter* when combined with another signal, otherwise
+    # as a standalone crossover entry.
+    ema_period = _first_int(re.findall(r"(\d{1,3})\s*(?:ema|period|ma)", t)) or 20
+    if wants_ema:
+        has_other = bool(long_sig or short_sig)
+        if has_other:
+            if long_sig:
+                long_sig.append("price_above_ema")
+            if short_sig:
+                short_sig.append("price_below_ema")
+        else:
+            long_sig.append("ema_cross_up")
+            short_sig.append("ema_cross_down")
+            if bias_long and not bias_short:
+                short_sig = []
+            if bias_short and not bias_long:
+                long_sig = []
+
+    # Fallback if nothing matched: a clean liquidity-sweep reversion (the house
+    # default that the NQ 9am work is built on).
+    if not long_sig and not short_sig:
+        long_sig = ["sweep_low"]
+        short_sig = ["sweep_high"]
+        reversion = True
+
+    # Risk model from text.
+    rr = _first_float(re.findall(r"(?:1\s*[:/]\s*|rr\s*|reward[:\s]*)(\d+(?:\.\d+)?)\s*r?", t))
+    if rr is None:
+        rr = _first_float(re.findall(r"(\d+(?:\.\d+)?)\s*r\b", t))
+    rr = rr or (1.5 if reversion else 2.0)
+
+    stop_atr = _first_float(re.findall(r"(\d+(?:\.\d+)?)\s*(?:x\s*)?atr", t)) or 1.0
+
+    # Session / timing.
+    after = _find_time(re.search(r"(?:after|from|at|open(?:ing)?)\s*(\d{1,2}[:.]\d{2})", t))
+    before = _find_time(re.search(r"(?:before|until|till|to)\s*(\d{1,2}[:.]\d{2})", t))
+    if re.search(r"\b9\s*am|9:30|opening|first hour|morning\b", t) and after is None:
+        after = "09:30"
+
+    max_pd = _first_int(re.findall(r"(\d+)\s*(?:trades? per day|/day|per day)", t)) or 1
+
+    name = _name_from(long_sig, short_sig, reversion)
+    return StrategySpec(
+        name=name,
+        long_entry=long_sig,
+        short_entry=short_sig,
+        ema_period=ema_period,
+        stop_atr=round(stop_atr, 2),
+        rr=round(rr, 2),
+        entry_after=after,
+        entry_before=before,
+        max_trades_per_day=max_pd,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 2. Spec  <->  generated code
+# --------------------------------------------------------------------------- #
+def write_strategy(spec: StrategySpec, path: str | None = None) -> str:
+    """Serialise the spec into a runnable strategy module and return its path."""
+    path = path or _STRAT_FILE
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    d = spec.to_dict()
+    code = f'''"""AUTO-GENERATED by the Thinking Machine agent. Do not hand-edit -
+it is overwritten every time an idea is parsed or an improvement is applied.
+
+Strategy: {spec.describe()}
+"""
+from core.strategy import StrategySpec
+
+SPEC = StrategySpec(
+    name={d["name"]!r},
+    long_entry={d["long_entry"]!r},
+    short_entry={d["short_entry"]!r},
+    ema_period={d["ema_period"]},
+    atr_period={d["atr_period"]},
+    sweep_lookback={d["sweep_lookback"]},
+    stop_atr={d["stop_atr"]},
+    rr={d["rr"]},
+    rth_only={d["rth_only"]},
+    entry_after={d["entry_after"]!r},
+    entry_before={d["entry_before"]!r},
+    max_trades_per_day={d["max_trades_per_day"]},
+    exit_on_session_close={d["exit_on_session_close"]},
+)
+'''
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(code)
+    return path
+
+
+def load_spec(path: str | None = None) -> StrategySpec:
+    """Import the generated module and return its SPEC (executes the code)."""
+    path = path or _STRAT_FILE
+    spec = importlib.util.spec_from_file_location("current_strategy", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.SPEC
+
+
+# --------------------------------------------------------------------------- #
+# 3. Quant Researcher insight + improvement
+# --------------------------------------------------------------------------- #
+def analyze_performance(results: dict, spec: StrategySpec) -> str:
+    """Read the metrics and explain *why* the strategy behaved as it did."""
+    m = results
+    n = m["trades"]
+    if n == 0:
+        return ("No trades fired. The entry confluence is too strict for this "
+                "data/timeframe - every required signal almost never lines up on "
+                "the same bar.")
+
+    pf = m["profit_factor"]
+    exp = m["expectancy_r"]
+    wr = m["win_rate"]
+    rr = m["avg_rr"]
+    lines = ["QUANT RESEARCHER INSIGHT", "-" * 60]
+
+    # Headline verdict.
+    if exp > 0.05 and (pf == float("inf") or pf > 1.2):
+        verdict = "edge present"
+    elif exp > 0:
+        verdict = "marginally positive - within noise"
+    else:
+        verdict = "no edge / losing"
+    lines.append(f"Verdict: {verdict}  (expectancy {exp:+.3f} R/trade over {n} trades).")
+
+    # Win-rate vs RR shape.
+    if wr < 45 and rr > 1.6:
+        lines.append(f"- This is a low-hit/high-payoff profile (win {wr:.0f}%, RR "
+                     f"{_fmt(rr)}). It depends on the {m['max_win_streak']}-trade winners; "
+                     f"the {m['max_loss_streak']}-loss streak is the psychological risk.")
+    elif wr > 60 and rr < 1.2:
+        lines.append(f"- High hit-rate ({wr:.0f}%) but thin payoff (RR {_fmt(rr)}). "
+                     "Profit is fragile: a single oversized loss can erase many wins.")
+    else:
+        lines.append(f"- Balanced shape: {wr:.0f}% win rate at {_fmt(rr)} RR.")
+
+    # Profit factor read.
+    if pf == float("inf"):
+        lines.append("- No losing trades in-sample - almost certainly overfit / too few trades.")
+    elif pf < 1.0:
+        lines.append(f"- Profit factor {pf:.2f}: gross losses exceed gross wins. "
+                     "The signal is firing on the wrong side of the move, or the "
+                     "stop is being run before the target.")
+    elif pf < 1.3:
+        lines.append(f"- Profit factor {pf:.2f}: a real but thin edge; costs/slippage "
+                     "(not yet modelled) could flip it negative.")
+    else:
+        lines.append(f"- Profit factor {pf:.2f}: healthy in-sample.")
+
+    # Sample-size caution.
+    if n < 30:
+        lines.append(f"- Only {n} trades - treat every number as a hint, not proof. "
+                     "Loosen filters or extend the window before trusting it.")
+
+    # Drawdown.
+    if m["max_drawdown_r"] < -2 * max(abs(exp) * n, 1):
+        lines.append(f"- Max drawdown {m['max_drawdown_r']:.1f} R is deep relative to "
+                     "total return - equity curve is lumpy.")
+
+    return "\n".join(lines)
+
+
+def suggest_improvement(results: dict, spec: StrategySpec) -> tuple[str, StrategySpec]:
+    """Propose ONE concrete, mechanical change. Returns (explanation, new_spec)."""
+    m = results
+    n = m["trades"]
+
+    # 1) Nothing fired -> drop the weakest confluence leg to loosen entries.
+    if n == 0:
+        new = _loosen(spec)
+        return ("Entries never triggered. Drop the most restrictive confluence "
+                f"leg so the strategy can actually take trades.\n"
+                f"  -> long_entry {spec.long_entry} => {new.long_entry}; "
+                f"short_entry {spec.short_entry} => {new.short_entry}", new)
+
+    # 2) Too few trades -> remove an EMA/confluence filter.
+    if n < 25 and (("price_above_ema" in spec.long_entry) or ("price_below_ema" in spec.short_entry)):
+        new = replace(spec,
+                      long_entry=[s for s in spec.long_entry if s != "price_above_ema"],
+                      short_entry=[s for s in spec.short_entry if s != "price_below_ema"],
+                      name=spec.name + "_noEMAfilter")
+        return (f"Only {n} trades. Remove the EMA trend filter to roughly double the "
+                "sample and test whether the filter was actually helping.", new)
+
+    # 3) Losing -> if it's a pure reversion play, try flipping nothing but instead
+    #    adding a trend filter; if it already has one, tighten the stop / cut RR.
+    exp = m["expectancy_r"]
+    if exp <= 0:
+        has_ema = ("price_above_ema" in spec.long_entry) or ("price_below_ema" in spec.short_entry)
+        if not has_ema:
+            new = replace(spec,
+                          long_entry=spec.long_entry + (["price_above_ema"] if spec.long_entry else []),
+                          short_entry=spec.short_entry + (["price_below_ema"] if spec.short_entry else []),
+                          name=spec.name + "_emaFilter")
+            return ("Negative expectancy. Add an EMA trend filter so you only take "
+                    f"longs above the {spec.ema_period}-EMA and shorts below it - this "
+                    "removes counter-trend entries that are bleeding the account.", new)
+        else:
+            new = replace(spec, rr=max(1.0, round(spec.rr - 0.5, 2)), name=spec.name + "_tighterTgt")
+            return (f"Negative expectancy with a trend filter already on. Pull the target "
+                    f"in from {spec.rr}R to {new.rr}R - winners are reversing before they "
+                    "reach a far target.", new)
+
+    # 4) Low win rate but positive -> widen target to harvest the trend.
+    if m["win_rate"] < 42 and exp > 0:
+        new = replace(spec, rr=round(spec.rr + 0.5, 2), name=spec.name + "_widerTgt")
+        return (f"Win rate is low ({m['win_rate']:.0f}%) but expectancy is positive - "
+                f"the winners run. Push the target from {spec.rr}R to {new.rr}R to let "
+                "them run further.", new)
+
+    # 5) High win rate, thin RR -> give it more room / fewer trades per day.
+    if m["win_rate"] > 60 and m["avg_rr"] < 1.2:
+        new = replace(spec, stop_atr=round(spec.stop_atr + 0.25, 2), name=spec.name + "_widerStop")
+        return (f"High win rate ({m['win_rate']:.0f}%) but thin RR. Widen the stop from "
+                f"{spec.stop_atr}x to {new.stop_atr}x ATR so normal noise stops getting "
+                "you out at break-even/small loss.", new)
+
+    # 6) Healthy -> restrict to the opening window to concentrate the edge.
+    if spec.entry_after is None:
+        new = replace(spec, entry_after="09:30", entry_before="11:00", name=spec.name + "_amWindow")
+        return ("Strategy is healthy. Concentrate it into the 09:30-11:00 window where "
+                "ICT liquidity moves are cleanest, and see if expectancy per trade rises.", new)
+
+    new = replace(spec, max_trades_per_day=spec.max_trades_per_day + 1, name=spec.name + "_moreTrades")
+    return (f"Edge looks robust. Allow {new.max_trades_per_day} trades/day instead of "
+            f"{spec.max_trades_per_day} to scale the number of opportunities.", new)
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+def _loosen(spec: StrategySpec) -> StrategySpec:
+    """Drop the last (most specific) leg from each side."""
+    le = spec.long_entry[:-1] if len(spec.long_entry) > 1 else spec.long_entry
+    se = spec.short_entry[:-1] if len(spec.short_entry) > 1 else spec.short_entry
+    return replace(spec, long_entry=le, short_entry=se, name=spec.name + "_loosened")
+
+
+def _name_from(long_sig, short_sig, reversion):
+    base = "_".join(dict.fromkeys([s.split("_")[0] for s in (long_sig + short_sig)])) or "strategy"
+    return f"{base}{'_reversion' if reversion else ''}"
+
+
+def _fmt(x):
+    return "inf" if x == float("inf") else f"{x:.2f}"
+
+
+def _first_int(matches):
+    for x in matches:
+        try:
+            return int(x)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _first_float(matches):
+    for x in matches:
+        try:
+            return float(x)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _find_time(match):
+    if not match:
+        return None
+    return match.group(1).replace(".", ":")

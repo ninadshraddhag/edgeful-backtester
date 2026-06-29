@@ -175,7 +175,9 @@ def sim_day(rec, cfg) -> list:
     hb, lb = rec["hb"], rec["lb"]                  # precomputed cumulative breach state
     # realism guard: require the breach to be confirmed on a PRIOR (closed) bar, so
     # the breakout candle and the retrace-entry candle can't be the same 1-min bar.
-    bprior = cfg.get("breach_confirm_prior", False)
+    # DEFAULT TRUE — realistic fills everywhere unless a caller explicitly opts out
+    # (the Strategy-tab A/B toggle passes False to show the optimistic comparison).
+    bprior = cfg.get("breach_confirm_prior", True)
     # exit controls (all default to the original behaviour):
     be_at = cfg.get("be_at", 0.0)              # breakeven: move stop to entry once the
     #                                            trade is +be_at·R in favour (0 = off)
@@ -204,7 +206,11 @@ def sim_day(rec, cfg) -> list:
         # ── entry (only when flat) ───────────────────────────────────────────
         if pos == 0 and (reentry or not traded) and tm < eff_min and \
                 (not ew or (e0 <= tm <= e1)):
-            bias = _bias_at(f_side, c_vote, n_enabled, use_vwap, logic, cl, vw)
+            # when breach_confirm_prior is on, also use prior bar's close/VWAP for
+            # the direction vote — prevents same-candle VWAP-cross entries
+            vcl = pc[i - 1] if (bprior and i > 0) else cl
+            vvw = pv[i - 1] if (bprior and i > 0) else vw
+            bias = _bias_at(f_side, c_vote, n_enabled, use_vwap, logic, vcl, vvw)
             if bias == 1:
                 eP, sP, tP = ib_high - entry * rng, ib_high - sl * rng, ib_high + target * rng
                 if sP < eP and tP > eP and _breach_ok(True, cfg, hbi, lbi) \

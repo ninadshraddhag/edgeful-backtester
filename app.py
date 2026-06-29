@@ -1885,6 +1885,22 @@ def _ib50_seed_cfg2(ib_min, open_t, close_t, entry_end, uc, uv, ub, bmode, e, s,
 # fills. Realistic configs lean on no-breach / fade legs (the breakout legs were the
 # ones gaming the same-candle fill). All hold out-of-sample (2024+ / 2025).
 IB50_SEED_PRESETS = {
+    # Gold THREE-session 6-leg (Asia+London+NY) — the diversification rebuild (2026-06-26).
+    # Adding the Tokyo 20:00-24:00 ET session broke gold's 2-session 74%-green ceiling.
+    # TRAIN (pre-2024) 81% green / +8.28 R/mo; HOLDOUT 2024+ 68% green / +3.78 R/mo;
+    # FULL 78% green / +7.43 R/mo, maxDD only -29.6R, 19.6 trades/wk, avg pairwise corr ~0.00
+    # (three uncorrelated time-windows). Clean prior-bar VWAP vote; 2-slice train-robust + OOS.
+    "★ Gold 3-session 6-leg · Asia+London+NY (81%→68% green, ~8R/mo)": [
+        # — Asia / Tokyo block (20:00–24:00 ET) —
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 1200, 1439, 1380, False, True,  True, "Require Not-Breached", 40, 100, 150, 100.0, uf=True)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 1200, 1439, 1380, False, True,  True, "Require Not-Breached", 15, 100, 150, 100.0, uf=True)},
+        # — London block (3:00–7:00 ET) —
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180,  420,  360,  True,  False, True, "Require Breached",     15, 100, 50,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180,  420,  360,  True,  True,  True, "Require Not-Breached", 40, 100, 50,  100.0)},
+        # — NY block (9:30–12:00 ET) —
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570,  720,  690,  False, True,  True, "Require Not-Breached", 30, 100, 50,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570,  720,  690,  True,  True,  True, "Require Not-Breached", 30, 50,  100, 100.0)},
+    ],
     # Gold cross-session 6-leg: FULL +9.3 R/mo, OOS +7.9 (84%), 79% green, DD −26.5R,
     # acc 32% / RR 2.83. London block uses a FORMATION+VWAP leg (formation helps at the
     # London open — it cut combined DD from −34R to −26.5R). Sessions don't overlap →
@@ -1907,6 +1923,22 @@ IB50_SEED_PRESETS = {
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  False, "Require Breached",     25, 100, 100, 100.0, vex=False)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0, vex=False)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0, vex=False)},
+    ],
+    # Same 6 e25 legs as the "~9.3R" preset, but verified under the CLEAN prior-bar
+    # VWAP vote (breach_confirm_prior now also gates the VWAP direction vote — a 1-min
+    # candle can't cross VWAP intra-bar and fill the 25% entry on the same bar). Honest
+    # engine-consistent result: FULL +4.24 R/mo, 65% green, maxDD −29.4R; TRAIN +4.53,
+    # HOLDOUT (2024+) +3.02 / 56% green. NOTE: the earlier "~6.7R" was a POST-HOC estimate
+    # (only deleted the 15% intra-bar-cross trades); the prior-bar vote removes more of the
+    # same-candle edge, hence 4.2 not 6.7. Much smoother DD than the re-optimised Method-B
+    # 6-leg (−29R vs −64R) for ~70% of the return.
+    "★ Gold London+NY 6-leg · CLEAN VWAP e25 (~4.2R/mo, DD −29R)": [
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  False, "Require Breached",     25, 100, 100, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0)},
+        {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0)},
     ],
     # Gold NY only: FULL +4.9 R/mo, OOS +4.1 (80%), corr 0.35
     "★ Gold NY (realistic, ~4.9R/mo)": [
