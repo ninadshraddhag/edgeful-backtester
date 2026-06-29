@@ -1905,7 +1905,7 @@ IB50_SEED_PRESETS = {
     # acc 32% / RR 2.83. London block uses a FORMATION+VWAP leg (formation helps at the
     # London open — it cut combined DD from −34R to −26.5R). Sessions don't overlap →
     # peak concurrency stays 3.
-    "★ Gold London+NY 6-leg (realistic, ~9.3R/mo)": [
+    "★ Gold London+NY 6-leg (realistic, ~4.3R/mo)": [
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0)},
@@ -1916,7 +1916,7 @@ IB50_SEED_PRESETS = {
     # Same 6 legs, VWAP-close exit OFF (trades run to TP / session close): gross +10.7,
     # acc 43% (vs 32%), max losing streak 18 (vs 30), DD −37R — higher net, fewer
     # gut-punch streaks, at a slightly deeper drawdown. Compare against the ON version.
-    "★ Gold London+NY 6-leg · VWAP-exit OFF (~10.7R/mo)": [
+    "★ Gold London+NY 6-leg · VWAP-exit OFF (~5.7R/mo)": [
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0, vex=False)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True, vex=False)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0, vex=False)},
@@ -1941,19 +1941,19 @@ IB50_SEED_PRESETS = {
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0)},
     ],
     # Gold NY only: FULL +4.9 R/mo, OOS +4.1 (80%), corr 0.35
-    "★ Gold NY (realistic, ~4.9R/mo)": [
+    "★ Gold NY (realistic, ~3.0R/mo)": [
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, False, True,  False, "Require Breached",     25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 570, 720, 690, True,  True,  True,  "Require Not-Breached", 25, 100, 100, 100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached",     25, 75,  75,  100.0)},
     ],
     # Gold London only (with formation+VWAP leg): FULL +4.4 R/mo, OOS +3.8 (82%), DD −26R
-    "★ Gold London (realistic, ~4.4R/mo)": [
+    "★ Gold London (realistic, ~1.2R/mo)": [
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  75,  100.0)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(15, 180, 420, 360, False, True,  True,  "Require Breached",     25, 75,  100, 100.0, uf=True)},
         {"instrument": "XAUUSD", "cfg": _ib50_seed_cfg2(30, 180, 420, 360, True,  True,  True,  "Require Breached",     25, 100, 75,  100.0)},
     ],
     # NQ 09:30-12:00: FULL +3.9 R/mo, OOS +2.5 (55% retention — weaker), DD −19R
-    "★ NQ 3-leg (realistic, ~3.9R/mo)": [
+    "★ NQ 3-leg (realistic, ~2.8R/mo)": [
         {"instrument": "NQ", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, True,  True,  True,  "Require Breached", 25, 75,  75)},
         {"instrument": "NQ", "cfg": _ib50_seed_cfg2(60, 570, 720, 690, True,  False, False, "Require Breached", 25, 75,  75)},
         {"instrument": "NQ", "cfg": _ib50_seed_cfg2(15, 570, 720, 690, False, True,  False, "Require Breached", 25, 100, 100)},
