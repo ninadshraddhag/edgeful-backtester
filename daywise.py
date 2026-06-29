@@ -218,7 +218,10 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
         else:                                              # after_breach (breakout-retest)
             if b_idx is None:
                 return None
-            mask &= (order >= b_idx)
+            # realistic fill: the retrace entry must be on a STRICTLY LATER candle
+            # than the breach — a single candle can't both break the IB and fill the
+            # retrace (same fix as the IB50 prior-bar-breach guard).
+            mask &= (order > b_idx)
     idx = np.where(mask)[0]
     if len(idx) == 0:
         return None
