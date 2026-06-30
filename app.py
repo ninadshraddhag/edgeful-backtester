@@ -724,6 +724,28 @@ h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
   border-right: 1px solid rgba(255,255,255,0.07);
   background: #0C0E12;
 }
+
+/* ——— larger, more readable type ——— */
+.stApp, .stMarkdown p, .stMarkdown li, p { font-size: 16.5px; line-height: 1.6; }
+label, [data-testid="stWidgetLabel"] p, .stRadio label, .stCheckbox label {
+  font-size: 15.5px !important; color: #C9CDD4;
+}
+[data-testid="stCaptionContainer"] p, [data-testid="stCaptionContainer"] {
+  font-size: 14px !important;
+}
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { font-size: 14.5px !important; }
+/* results 1-2pt smaller than default */
+[data-testid="stMetricValue"] { font-size: 1.85rem !important; }
+.stTabs [data-baseweb="tab"] { font-size: 15px; }
+h1 { font-size: 2.0rem; } h2 { font-size: 1.5rem; } h3 { font-size: 1.22rem; }
+
+/* ——— multiselect / select chips: readable on dark (bright green washed text) ——— */
+[data-baseweb="tag"] {
+  background-color: rgba(37,240,138,0.16) !important;
+  border: 1px solid rgba(37,240,138,0.45) !important;
+}
+[data-baseweb="tag"] span, [data-baseweb="tag"] div { color: #5FF2A7 !important; }
+[data-baseweb="tag"] svg { fill: #5FF2A7 !important; color: #5FF2A7 !important; }
 </style>
 """
 
