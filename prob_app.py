@@ -417,7 +417,7 @@ def render():
     fig_e.add_vline(x=bear_ext, line_dash="dot", line_color="#F44336")
     fig_e.update_layout(title="P(reach extension ≥ x) given that side broke first",
                         xaxis_title="extension (× range)", yaxis_title="% of days",
-                        height=340, template="plotly_white",
+                        height=340, template="plotly_dark",
                         legend=dict(orientation="h", y=1.15))
     st.plotly_chart(fig_e, use_container_width=True)
 
@@ -477,7 +477,7 @@ def render():
                     y=[b["high"]*100, b["low"]*100, b["both"]*100, b["one"]*100, b["none"]*100],
                     marker_color="#B0BEC5")
         fig.update_layout(title="Break probabilities vs baseline", barmode="group",
-                          height=360, template="plotly_white", yaxis_title="%",
+                          height=360, template="plotly_dark", yaxis_title="%",
                           legend=dict(orientation="h", y=1.12))
         st.plotly_chart(fig, use_container_width=True)
     with g2:
@@ -490,7 +490,7 @@ def render():
         fig2.add_bar(name="LOW breaks", x=dow_tbl.index, y=dow_tbl[f"{tag}_low_break"]*100,
                      marker_color="#F44336")
         fig2.update_layout(title="Break rate by day of week (current slice)", barmode="group",
-                           height=360, template="plotly_white", yaxis_title="%",
+                           height=360, template="plotly_dark", yaxis_title="%",
                            legend=dict(orientation="h", y=1.12))
         st.plotly_chart(fig2, use_container_width=True)
 

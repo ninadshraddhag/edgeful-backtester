@@ -1,10 +1,10 @@
-# Edgeful theme — clean, light, fintech. Charts use plotly_white to match.
+# Sharp — dark quantitative theme (#25F08A on near-black). Charts use plotly_dark.
 [theme]
-base = "light"
-primaryColor = "#1565C0"
-backgroundColor = "#FAFBFD"
-secondaryBackgroundColor = "#EEF2F7"
-textColor = "#15233B"
+base = "dark"
+primaryColor = "#25F08A"
+backgroundColor = "#0A0B0D"
+secondaryBackgroundColor = "#15171C"
+textColor = "#ECEDEF"
 font = "sans serif"
 
 [browser]

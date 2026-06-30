@@ -34,7 +34,8 @@ import live_stats
 import report
 from datetime import time as dtime
 
-st.set_page_config(page_title="Backtester Pro", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Sharp · Backtest with precision", page_icon="#️⃣",
+                   layout="wide")
 
 HERE  = os.path.dirname(os.path.abspath(__file__))
 FACTS = os.path.join(HERE, "analysis", "facts.csv")
@@ -369,7 +370,7 @@ def _clean_candles(fig, x, day_df):
 
 def _clean_layout(fig, height=480, title=None):
     fig.update_layout(
-        height=height, template="plotly_white", xaxis_rangeslider_visible=False,
+        height=height, template="plotly_dark", xaxis_rangeslider_visible=False,
         margin=dict(t=42 if title else 14, b=16, l=8, r=8),
         plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified",
         dragmode="pan", showlegend=False,
@@ -616,13 +617,13 @@ def confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t):
                     line=dict(color="#2196F3", width=2),
                     fill="tozeroy", fillcolor="rgba(33,150,243,0.08)")
     fig.update_layout(title="Combined equity (points, 1 unit per trade)", height=320,
-                      template="plotly_white", margin=dict(t=40, b=10))
+                      template="plotly_dark", margin=dict(t=40, b=10))
     st.plotly_chart(fig, use_container_width=True)
     figd = go.Figure()
     figd.add_scatter(x=dts, y=dd, mode="lines", name="Drawdown",
                      line=dict(color="#E53935", width=1.5),
                      fill="tozeroy", fillcolor="rgba(229,57,53,0.15)")
-    figd.update_layout(title="Drawdown (points)", height=220, template="plotly_white",
+    figd.update_layout(title="Drawdown (points)", height=220, template="plotly_dark",
                        margin=dict(t=40, b=10))
     st.plotly_chart(figd, use_container_width=True)
 
@@ -648,70 +649,105 @@ def confluence_tab(P, instrument, tag, mpath, mtime, open_t, end_t, close_t):
 
 # ─── UI helpers ───────────────────────────────────────────────────────────────
 
+# Sharp brand tokens
+ACCENT = "#25F08A"
+BG = "#0A0B0D"
+SURFACE = "#15171C"
+BORDER = "rgba(255,255,255,0.07)"
+TXT = "#ECEDEF"
+MUT = "#878C96"
+# the # mark (4 rects, green) — reused in the sidebar lockup and the main header
+SHARP_MARK = ('<svg width="{w}" height="{w}" viewBox="0 0 100 100"><g fill="' + ACCENT +
+              '"><rect x="36" y="14" width="8" height="72" rx="2"/>'
+              '<rect x="58" y="14" width="8" height="72" rx="2"/>'
+              '<rect x="22" y="34" width="56" height="8" rx="2" transform="rotate(-13 50 38)"/>'
+              '<rect x="22" y="58" width="56" height="8" rx="2" transform="rotate(-13 50 62)"/>'
+              '</g></svg>')
+
 APP_CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 /* ——— typography ——— */
-h1 { letter-spacing: -0.02em; font-weight: 800; }
-h2, h3 { letter-spacing: -0.01em; }
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+  font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em;
+  font-weight: 700; color: #ECEDEF;
+}
+.stApp { background: #0A0B0D; }
 
 /* ——— metric cards ——— */
 [data-testid="stMetric"] {
-  background: linear-gradient(180deg, #ffffff 0%, #f6f9fc 100%);
-  border: 1px solid #e3e9f2;
+  background: #15171C;
+  border: 1px solid rgba(255,255,255,0.07);
   border-radius: 14px;
   padding: 14px 16px 10px 16px;
-  box-shadow: 0 1px 3px rgba(16, 42, 67, 0.06);
 }
-[data-testid="stMetricLabel"] { color: #5b6b7f; }
-[data-testid="stMetricValue"] { font-weight: 700; letter-spacing: -0.01em; }
+[data-testid="stMetricLabel"] { color: #878C96; }
+[data-testid="stMetricValue"] { font-weight: 700; letter-spacing: -0.01em; color: #ECEDEF; }
 
 /* ——— tabs ——— */
-.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+.stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .stTabs [data-baseweb="tab"] {
-  background: #eef2f7;
+  background: #121419;
   border-radius: 10px 10px 0 0;
   padding: 8px 16px;
   font-weight: 600;
+  color: #878C96;
 }
 .stTabs [aria-selected="true"] {
-  background: #ffffff;
-  border-bottom: 3px solid #1565C0;
+  background: #15171C;
+  color: #ECEDEF;
+  border-bottom: 3px solid #25F08A;
 }
 
 /* ——— expanders, dataframes, containers ——— */
 [data-testid="stExpander"] {
-  border: 1px solid #e3e9f2;
+  border: 1px solid rgba(255,255,255,0.07);
   border-radius: 12px;
-  background: #ffffff;
+  background: #121419;
 }
-[data-testid="stDataFrame"] { border: 1px solid #e3e9f2; border-radius: 12px; }
+[data-testid="stDataFrame"] { border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }
 [data-testid="stVerticalBlockBorderWrapper"] { border-radius: 12px; }
 
 /* ——— buttons ——— */
-.stButton button, .stDownloadButton button { border-radius: 10px; font-weight: 600; }
-.stButton button[kind="primary"] {
-  background: linear-gradient(90deg, #1565C0 0%, #1E88E5 100%);
-  border: none;
-  box-shadow: 0 2px 10px rgba(21, 101, 192, 0.35);
+.stButton button, .stDownloadButton button {
+  border-radius: 10px; font-weight: 600; border: 1px solid rgba(255,255,255,0.10);
 }
-.stButton button[kind="primary"]:hover { box-shadow: 0 4px 14px rgba(21, 101, 192, 0.5); }
+.stButton button[kind="primary"] {
+  background: #25F08A; color: #0A0B0D; border: none; font-weight: 700;
+  box-shadow: 0 2px 14px rgba(37, 240, 138, 0.30);
+}
+.stButton button[kind="primary"]:hover { box-shadow: 0 4px 18px rgba(37, 240, 138, 0.5); }
 
 /* ——— sidebar ——— */
 [data-testid="stSidebar"] {
-  border-right: 1px solid #e3e9f2;
-  background: linear-gradient(180deg, #f7f9fc 0%, #eef2f7 100%);
+  border-right: 1px solid rgba(255,255,255,0.07);
+  background: #0C0E12;
 }
 </style>
 """
 
 BRAND_HTML = """
-<div style="padding:4px 0 10px 0">
-  <span style="font-size:1.55rem;font-weight:800;letter-spacing:-0.02em;
-        background:linear-gradient(90deg,#1565C0,#26A69A);
-        -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-    ⚡ BACKTESTER PRO</span><br>
-  <span style="color:#7b8aa0;font-size:0.78rem;letter-spacing:0.06em;
-        text-transform:uppercase;">Quant Backtesting Suite</span>
+<div style="padding:6px 0 14px 0;display:flex;align-items:center;gap:12px">
+  <div style="width:46px;height:46px;border-radius:13px;background:#15171C;
+       border:1px solid rgba(255,255,255,0.07);display:flex;align-items:center;
+       justify-content:center;flex:none">""" + SHARP_MARK.format(w=26) + """</div>
+  <div>
+    <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.5rem;
+         letter-spacing:-0.03em;color:#ECEDEF;line-height:1">sharp</div>
+    <div style="font-family:'JetBrains Mono',monospace;color:#878C96;font-size:0.6rem;
+         letter-spacing:0.18em;text-transform:uppercase;margin-top:3px">Backtest with precision</div>
+  </div>
+</div>
+"""
+
+SHARP_HEADER = """
+<div style="display:flex;align-items:center;gap:14px;padding:2px 0 6px 0">
+  <div style="width:40px;height:40px;border-radius:11px;background:#15171C;
+       border:1px solid rgba(255,255,255,0.07);display:flex;align-items:center;
+       justify-content:center;flex:none">""" + SHARP_MARK.format(w=23) + """</div>
+  <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:2rem;
+       letter-spacing:-0.03em;color:#ECEDEF">sharp</div>
 </div>
 """
 
@@ -975,7 +1011,7 @@ def daywise_mode():
         for k, v in pend.items():
             st.session_state[k] = v
 
-    st.caption("Edgeful-style day-wise IB retracement · entry/stop in % of IB range "
+    st.caption("Day-wise IB retracement · entry/stop in % of IB range "
                "(retracement) · targets in % of IB range (extension) · half at TP1, "
                "runner to TP2 with stop at breakeven")
     _dw_init_state()
@@ -1356,7 +1392,7 @@ def _dw_show_results(res):
                     mode="lines", line=dict(color="#2196F3", width=2),
                     fill="tozeroy", fillcolor="rgba(33,150,243,0.10)")
     fig.update_layout(title="Equity curve (points, 1 unit / trade)", height=340,
-                      template="plotly_white", yaxis_title="cumulative pts")
+                      template="plotly_dark", yaxis_title="cumulative pts")
     st.plotly_chart(fig, use_container_width=True)
 
     # per-weekday breakdown
@@ -1375,7 +1411,7 @@ def _dw_show_results(res):
         oc = trades["outcome"].value_counts()
         figp = go.Figure(go.Bar(x=oc.values, y=oc.index, orientation="h",
                                 marker_color="#4CAF50"))
-        figp.update_layout(height=260, template="plotly_white", margin=dict(t=10, b=10))
+        figp.update_layout(height=260, template="plotly_dark", margin=dict(t=10, b=10))
         st.plotly_chart(figp, use_container_width=True)
 
     with st.expander(f"Trade log ({len(trades):,})"):
@@ -2326,13 +2362,13 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
                     line=dict(color="#FB8C00", width=2), name="Holdout")
     fig.add_vline(x=pd.Timestamp(split), line=dict(width=1, dash="dot", color="#90A4AE"))
     fig.update_layout(title="Portfolio equity (cumulative R) — blue train · orange holdout",
-                      height=300, template="plotly_white", margin=dict(t=36, b=10),
+                      height=300, template="plotly_dark", margin=dict(t=36, b=10),
                       yaxis_title="R", legend=dict(orientation="h", y=1.12, x=0))
     e1c.plotly_chart(fig, use_container_width=True)
     figm = go.Figure()
     figm.add_bar(x=[f"{p.year}-{p.month:02d}" for p in mR.index], y=mR.values,
                  marker_color=["#2E7D32" if v > 0 else "#C62828" for v in mR.values])
-    figm.update_layout(title="Monthly R", height=300, template="plotly_white",
+    figm.update_layout(title="Monthly R", height=300, template="plotly_dark",
                        margin=dict(t=36, b=10), yaxis_title="R")
     e2c.plotly_chart(figm, use_container_width=True)
 
@@ -2379,7 +2415,7 @@ def _ib50_confluence_tab(instrument, mpath, mtime, d0, d1):
                      if len(vc) <= 4 else "#7E57C2",
                      text=[f"{v/nday*100:.0f}%" for v in vc.values], textposition="outside")
         figc.update_layout(title="Trading days by peak simultaneous risk",
-                           height=240, template="plotly_white", margin=dict(t=34, b=10),
+                           height=240, template="plotly_dark", margin=dict(t=34, b=10),
                            yaxis_title="days")
         st.plotly_chart(figc, use_container_width=True)
         # sizing implication: to cap portfolio risk at 1% you'd divide size by the
@@ -2596,7 +2632,7 @@ def ib50_mode():
                             line=dict(color="#2196F3", width=2), fill="tozeroy",
                             fillcolor="rgba(33,150,243,0.08)")
             fig.update_layout(title="Equity curve ($ cumulative)", height=320,
-                              template="plotly_white", margin=dict(t=40, b=10),
+                              template="plotly_dark", margin=dict(t=40, b=10),
                               yaxis_title="$")
             st.plotly_chart(fig, use_container_width=True)
 
@@ -2877,7 +2913,7 @@ def main():
     if not os.path.exists(FACTS):
         # first boot (e.g. fresh clone / Streamlit Cloud): build the facts
         # table from whatever instruments are available, instead of erroring.
-        st.title("📈 Backtester Pro")
+        st.markdown(SHARP_HEADER, unsafe_allow_html=True)
         if not data_store.discover():
             st.error("No instrument data found. Add a `*_minute.csv` or "
                      "`*_minute.parquet` file to the `data/` folder (or upload "
@@ -2905,7 +2941,7 @@ def main():
         advanced_mode.render()
         return
 
-    st.title("📈 Backtester Pro")
+    st.markdown(SHARP_HEADER, unsafe_allow_html=True)
     if mode == "Day-wise IB Retracement":
         daywise_mode()
         return
@@ -2980,7 +3016,7 @@ def main():
                             mode="lines", line=dict(color="#2196F3", width=2),
                             fill="tozeroy", fillcolor="rgba(33,150,243,0.10)")
             fig.update_layout(title=f"Equity curve — {logic_label} · target {t}× / stop {s}×",
-                              height=360, template="plotly_white",
+                              height=360, template="plotly_dark",
                               yaxis_title="cumulative pts")
             st.plotly_chart(fig, use_container_width=True)
 

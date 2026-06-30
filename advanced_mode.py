@@ -435,7 +435,7 @@ def _equity_tab(eq_df):
     peak = np.maximum.accumulate(eq_df["equity"].to_numpy())
     fig.add_scatter(x=eq_df["date"], y=peak, mode="lines",
                     line=dict(color="#90A4AE", width=1, dash="dot"), name="Peak")
-    fig.update_layout(height=340, template="plotly_white", yaxis_title="₹",
+    fig.update_layout(height=340, template="plotly_dark", yaxis_title="₹",
                       margin=dict(t=20, b=10), legend=dict(orientation="h", y=1.02, x=0))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -454,7 +454,7 @@ def _clean_candles(fig, x, V):
 
 def _clean_layout(fig, height=520, title=None):
     fig.update_layout(
-        height=height, template="plotly_white", xaxis_rangeslider_visible=False,
+        height=height, template="plotly_dark", xaxis_rangeslider_visible=False,
         margin=dict(t=42 if title else 14, b=16, l=8, r=8),
         plot_bgcolor="white", paper_bgcolor="white", hovermode="x unified",
         dragmode="pan",
