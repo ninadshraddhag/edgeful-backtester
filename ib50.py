@@ -68,6 +68,16 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
         first_side = 1 if t_lo < t_hi else (-1 if t_hi < t_lo else 1)
         ib_close = float(win.iloc[-1]["close"])
 
+        # first-session-candle direction (15/30/60-min): close of the first N-min
+        # candle vs the session open. Up = bullish vote, down = bearish (a static
+        # per-day directional vote like formation).
+        day_open = float(sess.iloc[0]["open"])
+        fc = {}
+        for n in (15, 30, 60):
+            cser = sess.loc[sess["t_min"] == open_t + n - 1, "close"]
+            fc[n] = (0 if cser.empty else
+                     (1 if cser.iloc[0] > day_open else (-1 if cser.iloc[0] < day_open else 0)))
+
         # session VWAP anchored at the session open (whole session, then sliced)
         src = (sess["high"] + sess["low"] + sess["close"]) / 3.0
         if has_vol:
@@ -96,7 +106,8 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
         out.append({
             "date": pd.Timestamp(day), "dow": dow,
             "ib_high": H, "ib_low": L, "ib_range": rng, "ib_close": ib_close,
-            "first_side": int(first_side), "day_open": float(sess.iloc[0]["open"]),
+            "first_side": int(first_side), "day_open": day_open,
+            "fc15": int(fc[15]), "fc30": int(fc[30]), "fc60": int(fc[60]),
             "pt": post["t_min"].to_numpy(float),
             "ph": ph_arr, "pl": pl_arr,
             "pc": post["close"].to_numpy(float),
@@ -110,8 +121,8 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
 # ─── direction bias + breach gate (Pine semantics) ────────────────────────────
 
 def _static_votes(rec, cfg):
-    """Per-day constant votes: formation side and IB-close-location, plus the
-    number of enabled filters."""
+    """Per-day constant votes: formation side, IB-close-location and first-candle
+    direction, plus the number of enabled filters."""
     f_side = rec["first_side"] if cfg["use_formation"] else 0
     cP = cfg["close_loc_pct"] / 100.0
     c_vote = 0
@@ -120,20 +131,24 @@ def _static_votes(rec, cfg):
             c_vote = 1
         elif rec["ib_close"] < rec["ib_low"] + (1.0 - cP) * rec["ib_range"]:
             c_vote = -1
+    fc_vote = 0
+    if cfg.get("use_firstcandle", False):
+        fc_vote = rec.get("fc%d" % int(cfg.get("firstcandle_min", 30)), 0)
     n_enabled = (1 if cfg["use_formation"] else 0) + \
-                (1 if cfg["use_closeloc"] else 0) + (1 if cfg["use_vwap"] else 0)
-    return f_side, c_vote, n_enabled
+                (1 if cfg["use_closeloc"] else 0) + (1 if cfg["use_vwap"] else 0) + \
+                (1 if cfg.get("use_firstcandle", False) else 0)
+    return f_side, c_vote, fc_vote, n_enabled
 
 
-def _bias_at(f_side, c_vote, n_enabled, use_vwap, logic, cl, vw):
+def _bias_at(f_side, c_vote, fc_vote, n_enabled, use_vwap, logic, cl, vw):
     """Bias for one bar; VWAP vote uses this bar's close vs VWAP."""
     if n_enabled == 0:
         return 0
     v_vote = 0
     if use_vwap and not np.isnan(vw):
         v_vote = 1 if cl > vw else (-1 if cl < vw else 0)
-    n_bull = (f_side == 1) + (c_vote == 1) + (v_vote == 1)
-    n_bear = (f_side == -1) + (c_vote == -1) + (v_vote == -1)
+    n_bull = (f_side == 1) + (c_vote == 1) + (v_vote == 1) + (fc_vote == 1)
+    n_bear = (f_side == -1) + (c_vote == -1) + (v_vote == -1) + (fc_vote == -1)
     if logic == "AND":
         return 1 if n_bull == n_enabled else (-1 if n_bear == n_enabled else 0)
     return 1 if (n_bull > 0 and n_bear == 0) else (-1 if (n_bear > 0 and n_bull == 0) else 0)
@@ -165,7 +180,7 @@ def sim_day(rec, cfg) -> list:
     if n == 0:
         return []
 
-    f_side, c_vote, n_enabled = _static_votes(rec, cfg)
+    f_side, c_vote, fc_vote, n_enabled = _static_votes(rec, cfg)
     entry, sl, target = cfg["entry_pct"] / 100.0, cfg["sl_pct"] / 100.0, cfg["target_pct"] / 100.0
     eff_min = cfg["eff_min"]
     ew, e0, e1 = cfg["use_entry_window"], cfg["entry_start_t"], cfg["entry_end_t"]
@@ -210,7 +225,7 @@ def sim_day(rec, cfg) -> list:
             # the direction vote — prevents same-candle VWAP-cross entries
             vcl = pc[i - 1] if (bprior and i > 0) else cl
             vvw = pv[i - 1] if (bprior and i > 0) else vw
-            bias = _bias_at(f_side, c_vote, n_enabled, use_vwap, logic, vcl, vvw)
+            bias = _bias_at(f_side, c_vote, fc_vote, n_enabled, use_vwap, logic, vcl, vvw)
             if bias == 1:
                 eP, sP, tP = ib_high - entry * rng, ib_high - sl * rng, ib_high + target * rng
                 if sP < eP and tP > eP and _breach_ok(True, cfg, hbi, lbi) \

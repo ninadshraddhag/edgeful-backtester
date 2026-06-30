@@ -2055,9 +2055,12 @@ def _ib50_confl_add(comp):
 
 
 def _ib50_cfg_label(cfg):
+    fc_flag = "·"
+    if cfg.get("use_firstcandle", False):
+        fc_flag = "H" if int(cfg.get("firstcandle_min", 30)) == 60 else "1"
     flags = "".join([("F" if cfg["use_formation"] else "·"),
                      ("C" if cfg["use_closeloc"] else "·"),
-                     ("V" if cfg["use_vwap"] else "·")])
+                     ("V" if cfg["use_vwap"] else "·"), fc_flag])
     br = (f"breach {cfg['breach_mode'][8:11]}/{cfg['breach_scope'][:3]}"
           if cfg["use_breach"] else "no-breach")
     win = ""
@@ -2542,6 +2545,12 @@ def ib50_mode():
                            value=True, key="ib50_vwap",
                            help="Direction vote AND exit: long exits on a close below "
                                 "VWAP, short on a close above.")
+    fcc = st.columns([1.4, 1])
+    use_fc = fcc[0].checkbox("First candle direction", value=False, key="ib50_fc",
+                             help="The first session candle's direction is a directional "
+                                  "vote: closes ABOVE the open → bullish, BELOW → bearish.")
+    fc_min = fcc[1].selectbox("First candle size", [15, 30, 60], index=1, key="ib50_fcmin",
+                              format_func=lambda m: ("1 hr" if m == 60 else f"{m} min"))
 
     # ── breach gate ───────────────────────────────────────────────────────────
     with st.expander("Breach gate (optional)"):
@@ -2606,6 +2615,7 @@ def ib50_mode():
     cfg = dict(
         ib_min=ib_min, open_t=open_t, close_t=close_t,
         use_formation=use_form, use_closeloc=use_close, close_loc_pct=float(close_pct),
+        use_firstcandle=use_fc, firstcandle_min=int(fc_min),
         use_vwap=use_vwap, logic=logic,
         use_breach=use_breach, breach_mode=breach_mode, breach_scope=breach_scope,
         entry_pct=float(entry_pct), sl_pct=float(sl_pct), target_pct=float(target_pct),
