@@ -1,11 +1,18 @@
-# Sharp — dark quantitative theme (#25F08A on near-black). Charts use plotly_dark.
+# Sharp — dark quantitative theme, readability pass: backgrounds lifted off
+# pure black, visible borders on widgets/sidebar/dataframes. Extra CSS polish
+# (scrollbars, dropdown menus) lives in ui_theme.py; brand CSS in app.py.
 [theme]
 base = "dark"
 primaryColor = "#25F08A"
-backgroundColor = "#0A0B0D"
-secondaryBackgroundColor = "#15171C"
+backgroundColor = "#12161f"
+secondaryBackgroundColor = "#1c2330"
 textColor = "#ECEDEF"
 font = "sans serif"
+borderColor = "#33415f"
+dataframeBorderColor = "#3c4d70"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "medium"
 
 [browser]
 gatherUsageStats = false

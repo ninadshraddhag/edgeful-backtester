@@ -44,6 +44,24 @@ ORB_MIN  = 15
 IB_MIN   = 60
 GAP_THRESHOLD = 0.15             # % vs prev close to qualify as Gap Up/Down
 
+# Clean gap-% buckets (mirrored for negative gaps), most-positive first.
+GAP_BUCKET_ORDER = ["> +1%", "+0.5% to +1%", "+0.2% to +0.5%", "0 to +0.2%",
+                    "0 to -0.2%", "-0.2% to -0.5%", "-0.5% to -1%", "< -1%"]
+
+
+def gap_bucket_label(gp):
+    """Map a gap % to its bucket label (0.2 / 0.5 / 1.0 boundaries, signed)."""
+    if pd.isna(gp):
+        return "n/a"
+    neg, a = gp < 0, abs(gp)
+    if a >= 1.0:
+        return "< -1%" if neg else "> +1%"
+    if a >= 0.5:
+        return "-0.5% to -1%" if neg else "+0.5% to +1%"
+    if a >= 0.2:
+        return "-0.2% to -0.5%" if neg else "+0.2% to +0.5%"
+    return "0 to -0.2%" if neg else "0 to +0.2%"
+
 
 def _first_extreme_side(win, hi, lo):
     t_hi = win.loc[win["high"] >= hi, "t_min"].min()
@@ -232,6 +250,7 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
             "pdh": pdh, "pdl": pdl,
             "gap_pct": round(gap_pct, 3) if prev_close else np.nan,
             "gap_type": gap_type,
+            "gap_bucket": gap_bucket_label(gap_pct if prev_close else np.nan),
             "inside_day": inside, "outside_day": outside,
             "prev_inside": prev_inside,        # yesterday was an inside day → breakout setup
             "broke_pdh": broke_pdh, "broke_pdl": broke_pdl,
@@ -270,6 +289,42 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
         prev_inside = inside
 
     return pd.DataFrame(recs)
+
+
+def sessionize(df, open_t, close_t):
+    """
+    Return (df2, open_t2, close_t2) with the session window guaranteed NOT to
+    cross midnight, so build_from_minute's per-calendar-day grouping works.
+
+    Same-day sessions (close_t >= open_t) pass through unchanged. Cross-midnight
+    sessions (e.g. Globex 18:00 → 16:00 next day, Asia 21:30 → 03:00) are
+    time-shifted forward so the open lands at 00:00 of the CLOSE date — i.e.
+    the session is labeled by the day it ends (futures trading-day convention:
+    Sunday 18:00 Globex open belongs to Monday).
+    """
+    if close_t >= open_t:
+        return df, open_t, close_t
+    shift = 1440 - open_t
+    df2 = df.copy()
+    df2["date"] = df2["date"] + pd.Timedelta(minutes=shift)
+    df2["date_only"] = df2["date"].dt.date
+    df2["t_min"] = df2["date"].dt.hour * 60 + df2["date"].dt.minute
+    return df2, 0, close_t + shift
+
+
+def build_session_facts(df, name, session, orb_min=ORB_MIN, ib_min=IB_MIN):
+    """
+    Facts table for a NAMED session of a 24-hour instrument (NY / Globex /
+    London / Asia — see data_store.SESSIONS_24H). Gap %, PDH/PDL and
+    inside/outside flags all chain session-vs-SAME-session (London gap =
+    London open vs previous London close, etc.) because each session is
+    built independently.
+    """
+    s = data_store.SESSIONS_24H[session]
+    if "t_min" not in df.columns:
+        df = clean_min(df)
+    df2, o2, c2 = sessionize(df, s["open_t"], s["close_t"])
+    return build_from_minute(df2, name, o2, c2, orb_min=orb_min, ib_min=ib_min)
 
 
 def build_instrument(name, path, open_t=None, close_t=None):

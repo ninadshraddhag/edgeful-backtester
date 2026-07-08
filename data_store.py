@@ -51,6 +51,22 @@ SESSION_DEFAULTS = {
     "XAUUSD": {"open_t": 9 * 60 + 30, "close_t": 16 * 60},   # 09:30–16:00 ET
 }
 
+# Named intraday sessions for 24-hour instruments (times in ET, matching the
+# data timestamps). Sessions whose close_t < open_t cross midnight; they are
+# labeled by their CLOSE date (futures convention: the Globex session opening
+# Sunday 18:00 belongs to Monday's trading day).
+SESSIONS_24H = {
+    "NY":     {"open_t": 9 * 60 + 30,  "close_t": 16 * 60,     "label": "NY  ·  09:30–16:00 ET"},
+    "Globex": {"open_t": 18 * 60,      "close_t": 16 * 60,     "label": "Globex  ·  18:00 → 16:00 ET (full day)"},
+    "London": {"open_t": 3 * 60,       "close_t": 9 * 60 + 30, "label": "London  ·  03:00–09:30 ET"},
+    "Asia":   {"open_t": 21 * 60 + 30, "close_t": 3 * 60,      "label": "Asia  ·  21:30–03:00 ET"},
+}
+
+
+def has_sessions(name: str) -> bool:
+    """True for 24-hour instruments (NQ, XAUUSD) that support session views."""
+    return name in SESSION_DEFAULTS
+
 
 def _name_from_file(fname: str) -> str:
     stem = os.path.splitext(os.path.basename(fname))[0]

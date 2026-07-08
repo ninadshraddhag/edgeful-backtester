@@ -22,6 +22,9 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+import build_facts
+import data_store
+
 # NOTE: set_page_config is NOT called at import time so this module can be embedded
 # as a mode inside app.py. It is only set when run standalone (see _standalone()).
 
@@ -30,6 +33,7 @@ FACTS  = os.path.join(HERE, "analysis", "facts.csv")
 DOW_ORDER  = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 GAP_ORDER  = ["Gap Up", "Flat", "Gap Down"]
 KIND_ORDER = ["Inside Day", "Normal", "Outside Day"]
+GAP_BUCKETS = build_facts.GAP_BUCKET_ORDER          # clean ±0.2/0.5/1% bands
 
 
 # ─── data ─────────────────────────────────────────────────────────────────────
@@ -60,8 +64,19 @@ def load_facts_custom(ib_min, _mtimes):
     return df
 
 
+@st.cache_data(show_spinner=True)
+def load_facts_session(inst, session, ib_min, mtime):
+    """Facts table for one NAMED session of a 24-h instrument (cached).
+    Gap/PDH/PDL chain session-vs-same-session (London vs London, Asia vs Asia)."""
+    path = data_store.discover()[inst]
+    mdf = build_facts.clean_min(data_store.read_minute(path))
+    out = build_facts.build_session_facts(mdf, inst, session, ib_min=ib_min)
+    out["day_kind"] = np.where(out["inside_day"], "Inside Day",
+                      np.where(out["outside_day"], "Outside Day", "Normal"))
+    return out
+
+
 def build_facts_inline():
-    import build_facts
     build_facts.main()          # builds for every discovered instrument
 
 
@@ -100,6 +115,14 @@ def parse_query(q: str) -> dict:
         upd["f_setup"] = "ORB (15 min)"
     elif "ib" in q or "initial balance" in q or "hour" in q:
         upd["f_setup"] = "IB"
+    if "globex" in q or "overnight" in q:
+        upd["f_session"] = "Globex"
+    elif "london" in q:
+        upd["f_session"] = "London"
+    elif "asia" in q or "tokyo" in q:
+        upd["f_session"] = "Asia"
+    elif "new york" in q or " ny " in f" {q} ":
+        upd["f_session"] = "NY"
     return upd
 
 
@@ -147,6 +170,7 @@ def gap_pd_table(s):
 def render():
     st.title("🎲 ORB / IB Probability Explorer")
     st.caption("All loaded instruments (NIFTY 50 · BANK NIFTY · NQ · XAUUSD) · "
+               "NQ/XAUUSD support session views: NY · Globex · London · Asia (ET) · "
                "set filters to ask a question, or type one below")
 
     if not os.path.exists(FACTS):
@@ -198,45 +222,73 @@ def render():
         if st.session_state.get("f_instrument") not in instruments:
             st.session_state["f_instrument"] = instruments[0]
         st.radio("Instrument", instruments, key="f_instrument")
+        inst = st.session_state["f_instrument"]
+
+        # session picker — 24-hour instruments only (NQ / XAUUSD)
+        session = "NY"
+        if data_store.has_sessions(inst):
+            if st.session_state.get("f_session") not in data_store.SESSIONS_24H:
+                st.session_state["f_session"] = "NY"
+            session = st.radio(
+                "Session", list(data_store.SESSIONS_24H.keys()),
+                format_func=lambda k: data_store.SESSIONS_24H[k]["label"],
+                key="f_session",
+                help="IB = first 60 min of the session, ORB = first 15 min. "
+                     "Cross-midnight sessions (Globex, Asia) are labeled by their "
+                     "CLOSE date — the Globex session opening Sunday 18:00 counts "
+                     "as Monday. Gap % is measured vs the SAME session's previous "
+                     "close (London vs London, Asia vs Asia).")
+
         st.radio("Setup", ["IB", "ORB (15 min)"], key="f_setup")
         st.number_input("IB duration (min)", 10, 240, step=10, key="f_ibmin",
                         help="Length of the Initial Balance window from the open, in "
                              "10-min steps (e.g. 40, 50). Non-60 values recompute the "
                              "stats live (cached).")
         tag  = "ib" if st.session_state["f_setup"].startswith("IB") else "orb"
-        inst = st.session_state["f_instrument"]
+
+        # data slice for the chosen instrument + session
+        if session != "NY" and data_store.has_sessions(inst):
+            _path = data_store.discover().get(inst)
+            with st.spinner(f"Building {inst} {session}-session stats "
+                            "(first time only, then cached)…"):
+                df_inst = load_facts_session(inst, session, ib_min,
+                                             os.path.getmtime(_path))
+        else:
+            df_inst = df[df["instrument"] == inst].copy()
+        if "gap_bucket" not in df_inst.columns:      # back-compat with old facts.csv
+            df_inst["gap_bucket"] = df_inst["gap_pct"].map(build_facts.gap_bucket_label)
+        if df_inst.empty:
+            st.warning("No sessions found for this instrument/session combination.")
+            st.stop()
 
         st.divider()
-        dmin = df["date"].min().date()
-        dmax = df["date"].max().date()
+        dmin = df_inst["date"].min().date()
+        dmax = df_inst["date"].max().date()
         date_sel = st.date_input("Date range", value=(dmin, dmax),
-                                 min_value=dmin, max_value=dmax, key="f_dates")
+                                 min_value=dmin, max_value=dmax,
+                                 key=f"f_dates_{inst}_{session}")
 
         st.multiselect("Day of week", DOW_ORDER, key="f_dow")
         st.multiselect("Gap type", GAP_ORDER, key="f_gap")
-        # precise gap-% band — drag to a specific gap, e.g. +0.2% to +0.8%
-        _gp = df.loc[df["instrument"] == inst, "gap_pct"].dropna()
-        g_min = float(np.clip(np.floor(_gp.min() * 10) / 10, -10.0, 0.0)) if len(_gp) else -5.0
-        g_max = float(np.clip(np.ceil(_gp.max() * 10) / 10, 0.0, 10.0)) if len(_gp) else 5.0
-        gap_rng = st.slider("Gap % range  (up +, down −)", g_min, g_max, (g_min, g_max),
-                            0.05, key=f"f_gap_pct_{inst}",
-                            help="Filter days by the exact opening-gap %. Drag the "
-                                 "handles to a band — e.g. +0.2% to +0.8% for a specific "
-                                 "gap-up day, or −0.5% to −0.1% for a small gap down.")
+        sel_buckets = st.multiselect(
+            "Gap % bucket", GAP_BUCKETS, default=GAP_BUCKETS,
+            key=f"f_gapbucket_{inst}_{session}",
+            help="Opening gap vs the previous session's close, in clean bands "
+                 "(±0–0.2% · 0.2–0.5% · 0.5–1% · 1%+). Deselect bands to focus — "
+                 "e.g. keep only '+0.2% to +0.5%' for small gap-ups.")
         st.multiselect("Day kind", KIND_ORDER, key="f_kind")
         st.radio("Which extreme formed first",
                  ["Either", "High formed first", "Low formed first"], key="f_first")
 
         st.divider()
-        base_inst = df[df["instrument"] == inst]
         size_col = f"{tag}_range"
         # IB/ORB size as a % of price (volatility-normalized, comparable across
         # instruments) instead of raw points
-        size_pct_all = (base_inst[size_col] / base_inst["day_open"] * 100).dropna()
+        size_pct_all = (df_inst[size_col] / df_inst["day_open"] * 100).dropna()
         s_lo = float(np.floor(size_pct_all.min() * 100) / 100) if len(size_pct_all) else 0.0
         s_hi = float(np.ceil(size_pct_all.quantile(0.995) * 100) / 100) if len(size_pct_all) else 2.0
         size_rng = st.slider(f"{tag.upper()} size (% of price)", s_lo, s_hi, (s_lo, s_hi),
-                             0.01, key=f"f_sizepct_{tag}_{inst}_{ib_min}",
+                             0.01, key=f"f_sizepct_{tag}_{inst}_{session}_{ib_min}",
                              help="Opening-range width as a % of price — a "
                                   "volatility-normalized size filter (e.g. 0.20%–0.40%).")
         st.caption("Filter days by IB/ORB size as a % of price.")
@@ -254,7 +306,7 @@ def render():
             st.rerun()
 
     # ── apply filters ─────────────────────────────────────────────────────────
-    scope = df[df["instrument"] == inst].copy()
+    scope = df_inst.copy()                       # single instrument + session
     if isinstance(date_sel, (tuple, list)) and len(date_sel) == 2:
         d0, d1 = pd.Timestamp(date_sel[0]), pd.Timestamp(date_sel[1]) + pd.Timedelta(days=1)
         scope = scope[(scope["date"] >= d0) & (scope["date"] < d1)]
@@ -264,7 +316,6 @@ def render():
 
     sub = scope[scope["dow"].isin(st.session_state["f_dow"])]
     sub = sub[sub["gap_type"].isin(st.session_state["f_gap"])]
-    sub = sub[(sub["gap_pct"] >= gap_rng[0]) & (sub["gap_pct"] <= gap_rng[1])]
     sub = sub[sub["day_kind"].isin(st.session_state["f_kind"])]
     if st.session_state["f_first"] == "High formed first":
         sub = sub[sub[f"{tag}_first_side"] == "high"]
@@ -272,16 +323,22 @@ def render():
         sub = sub[sub[f"{tag}_first_side"] == "low"]
     _sz_pct = sub[size_col] / sub["day_open"] * 100
     sub = sub[(_sz_pct >= size_rng[0]) & (_sz_pct <= size_rng[1])]
+    sub_all_buckets = sub.copy()                 # for the per-bucket breakdown table
+    if len(sel_buckets) < len(GAP_BUCKETS):
+        sub = sub[sub["gap_bucket"].isin(sel_buckets)]
 
     # ── headline sentence ─────────────────────────────────────────────────────
     setup_label = f"IB ({ib_min} min)" if tag == "ib" else "ORB (15 min)"
-    bits = [inst, setup_label]
+    bits = [inst]
+    if data_store.has_sessions(inst):
+        bits.append(f"{session} session")
+    bits.append(setup_label)
     if isinstance(date_sel, (tuple, list)) and len(date_sel) == 2:
         bits.append(f"{date_sel[0]}→{date_sel[1]}")
     if len(st.session_state["f_dow"]) < 5:  bits.append("/".join(st.session_state["f_dow"]))
     if len(st.session_state["f_gap"]) < 3:  bits.append("/".join(st.session_state["f_gap"]))
-    if gap_rng[0] > g_min or gap_rng[1] < g_max:
-        bits.append(f"gap {gap_rng[0]:+.2f}%…{gap_rng[1]:+.2f}%")
+    if len(sel_buckets) < len(GAP_BUCKETS):
+        bits.append("gap " + " / ".join(sel_buckets))
     if len(st.session_state["f_kind"]) < 3: bits.append("/".join(st.session_state["f_kind"]))
     if st.session_state["f_first"] != "Either": bits.append(st.session_state["f_first"])
     st.subheader("  ·  ".join(str(b) for b in bits))
@@ -418,15 +475,16 @@ def render():
     fig_e.update_layout(title="P(reach extension ≥ x) given that side broke first",
                         xaxis_title="extension (× range)", yaxis_title="% of days",
                         height=340, template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                         legend=dict(orientation="h", y=1.15))
     st.plotly_chart(fig_e, use_container_width=True)
 
     # ── PREVIOUS-DAY LEVELS (PDH / PDL) ───────────────────────────────────────
     st.divider()
     st.markdown("#### Previous-Day High / Low  (PDH / PDL)")
-    st.caption("Same-day INTRADAY touches only — measured within today's session up to the "
-               "15:15 square-off (PDH/PDL = previous session's high/low). Nothing carries to "
-               "the next day. Responds to date & day-of-week filters.")
+    st.caption("Same-session INTRADAY touches only — PDH/PDL = the PREVIOUS session's "
+               "high/low, measured until this session's close. Nothing carries beyond "
+               "the session. Responds to date & day-of-week filters.")
 
     pc = st.columns(3)
     # inside-day breakout: yesterday was an inside day
@@ -462,6 +520,30 @@ def render():
     with st.expander("PDH / PDL reach rates by gap type"):
         st.dataframe(gap_pd_table(pdset), use_container_width=True, hide_index=True)
 
+    # ── break stats by gap % bucket ───────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Break stats by gap % bucket")
+    st.caption("Every bucket in the current slice (before the gap-bucket filter) — "
+               "spot which gap sizes carry the edge at a glance.")
+    bkt_rows = []
+    for bkt in GAP_BUCKETS:
+        x = sub_all_buckets[sub_all_buckets["gap_bucket"] == bkt]
+        if len(x) == 0:
+            continue
+        bkt_rows.append({
+            "Gap bucket": bkt, "days": len(x),
+            "HIGH breaks %":  round(x[f"{tag}_high_break"].mean() * 100, 1),
+            "LOW breaks %":   round(x[f"{tag}_low_break"].mean() * 100, 1),
+            "BOTH %":         round(x[f"{tag}_both_break"].mean() * 100, 1),
+            "NEITHER %":      round(x[f"{tag}_no_break"].mean() * 100, 1),
+            "reach PDH %":    round(x["broke_pdh"].mean() * 100, 1),
+            "reach PDL %":    round(x["broke_pdl"].mean() * 100, 1),
+        })
+    if bkt_rows:
+        st.dataframe(pd.DataFrame(bkt_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No days with a measurable gap in this slice.")
+
     # ── charts: break probs + by day of week ──────────────────────────────────
     st.divider()
     g1, g2 = st.columns(2)
@@ -478,6 +560,7 @@ def render():
                     marker_color="#B0BEC5")
         fig.update_layout(title="Break probabilities vs baseline", barmode="group",
                           height=360, template="plotly_dark", yaxis_title="%",
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                           legend=dict(orientation="h", y=1.12))
         st.plotly_chart(fig, use_container_width=True)
     with g2:
@@ -491,11 +574,12 @@ def render():
                      marker_color="#F44336")
         fig2.update_layout(title="Break rate by day of week (current slice)", barmode="group",
                            height=360, template="plotly_dark", yaxis_title="%",
+                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                            legend=dict(orientation="h", y=1.12))
         st.plotly_chart(fig2, use_container_width=True)
 
     # ── slice table + download ────────────────────────────────────────────────
-    show_cols = ["date", "dow", "gap_type", "day_kind", f"{tag}_range",
+    show_cols = ["date", "dow", "gap_type", "gap_bucket", "day_kind", f"{tag}_range",
                  f"{tag}_first_side", f"{tag}_high_break", f"{tag}_low_break",
                  f"{tag}_up_ext", f"{tag}_dn_ext", "broke_pdh", "broke_pdl"]
     with st.expander(f"Matching days ({s['n']:,})"):
@@ -508,6 +592,8 @@ def render():
 
 def _standalone():
     st.set_page_config(page_title="ORB/IB Probability Explorer", page_icon="🎲", layout="wide")
+    import ui_theme
+    ui_theme.apply()
     render()
 
 

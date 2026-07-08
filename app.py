@@ -27,6 +27,7 @@ import plotly.graph_objects as go
 import daywise
 import ib50
 import prob_app
+import ui_theme
 import build_facts
 import data_store
 import live_feed
@@ -673,45 +674,45 @@ h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
   font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.02em;
   font-weight: 700; color: #ECEDEF;
 }
-.stApp { background: #0A0B0D; }
+.stApp { background: #12161f; }
 
 /* ——— metric cards ——— */
 [data-testid="stMetric"] {
-  background: #15171C;
-  border: 1px solid rgba(255,255,255,0.07);
+  background: #1c2330;
+  border: 1px solid rgba(255,255,255,0.16);
   border-radius: 14px;
   padding: 14px 16px 10px 16px;
 }
-[data-testid="stMetricLabel"] { color: #878C96; }
+[data-testid="stMetricLabel"] { color: #9aa2b1; }
 [data-testid="stMetricValue"] { font-weight: 700; letter-spacing: -0.01em; color: #ECEDEF; }
 
 /* ——— tabs ——— */
-.stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid rgba(255,255,255,0.14); }
 .stTabs [data-baseweb="tab"] {
-  background: #121419;
+  background: #181e29;
   border-radius: 10px 10px 0 0;
   padding: 8px 16px;
   font-weight: 600;
-  color: #878C96;
+  color: #9aa2b1;
 }
 .stTabs [aria-selected="true"] {
-  background: #15171C;
+  background: #1c2330;
   color: #ECEDEF;
   border-bottom: 3px solid #25F08A;
 }
 
 /* ——— expanders, dataframes, containers ——— */
 [data-testid="stExpander"] {
-  border: 1px solid rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.16);
   border-radius: 12px;
-  background: #121419;
+  background: #181e29;
 }
-[data-testid="stDataFrame"] { border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }
+[data-testid="stDataFrame"] { border: 1px solid rgba(255,255,255,0.16); border-radius: 12px; }
 [data-testid="stVerticalBlockBorderWrapper"] { border-radius: 12px; }
 
 /* ——— buttons ——— */
 .stButton button, .stDownloadButton button {
-  border-radius: 10px; font-weight: 600; border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 10px; font-weight: 600; border: 1px solid rgba(255,255,255,0.22);
 }
 .stButton button[kind="primary"] {
   background: #25F08A; color: #0A0B0D; border: none; font-weight: 700;
@@ -721,8 +722,8 @@ h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
 
 /* ——— sidebar ——— */
 [data-testid="stSidebar"] {
-  border-right: 1px solid rgba(255,255,255,0.07);
-  background: #0C0E12;
+  border-right: 1px solid rgba(255,255,255,0.14);
+  background: #151b26;
 }
 
 /* ——— larger, more readable type ——— */
@@ -751,8 +752,8 @@ h1 { font-size: 2.0rem; } h2 { font-size: 1.5rem; } h3 { font-size: 1.22rem; }
 
 BRAND_HTML = """
 <div style="padding:6px 0 14px 0;display:flex;align-items:center;gap:12px">
-  <div style="width:46px;height:46px;border-radius:13px;background:#15171C;
-       border:1px solid rgba(255,255,255,0.07);display:flex;align-items:center;
+  <div style="width:46px;height:46px;border-radius:13px;background:#1c2330;
+       border:1px solid rgba(255,255,255,0.16);display:flex;align-items:center;
        justify-content:center;flex:none">""" + SHARP_MARK.format(w=26) + """</div>
   <div>
     <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.5rem;
@@ -765,8 +766,8 @@ BRAND_HTML = """
 
 SHARP_HEADER = """
 <div style="display:flex;align-items:center;gap:14px;padding:2px 0 6px 0">
-  <div style="width:40px;height:40px;border-radius:11px;background:#15171C;
-       border:1px solid rgba(255,255,255,0.07);display:flex;align-items:center;
+  <div style="width:40px;height:40px;border-radius:11px;background:#1c2330;
+       border:1px solid rgba(255,255,255,0.16);display:flex;align-items:center;
        justify-content:center;flex:none">""" + SHARP_MARK.format(w=23) + """</div>
   <div style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:2rem;
        letter-spacing:-0.03em;color:#ECEDEF">sharp</div>
@@ -777,6 +778,7 @@ SHARP_HEADER = """
 def inject_style():
     """Global look & feel — called once per run, themes every mode."""
     st.markdown(APP_CSS, unsafe_allow_html=True)
+    ui_theme.apply()          # scrollbars, dropdown menus, input borders
     with st.sidebar:
         st.markdown(BRAND_HTML, unsafe_allow_html=True)
 
