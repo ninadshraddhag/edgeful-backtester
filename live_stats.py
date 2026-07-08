@@ -42,8 +42,10 @@ def classify_live(today_df, prev_hlc, open_t, close_t, now_t=None,
         feat["gap_pct"]  = round(gp, 3)
         feat["gap_type"] = ("Gap Up" if gp > build_facts.GAP_THRESHOLD
                             else "Gap Down" if gp < -build_facts.GAP_THRESHOLD else "Flat")
-        feat["broke_pdh"] = bool(df["high"].max() > prev_high)
-        feat["broke_pdl"] = bool(df["low"].min() < prev_low)
+        # TOUCH semantics (matches build_facts._pd_breaks): price must trade AT
+        # the level — a gap beyond PDH/PDL only counts after a pullback to it.
+        feat["broke_pdh"] = bool(((df["low"] <= prev_high) & (df["high"] >= prev_high)).any())
+        feat["broke_pdl"] = bool(((df["low"] <= prev_low) & (df["high"] >= prev_low)).any())
     else:
         feat["gap_pct"] = feat["gap_type"] = None
 

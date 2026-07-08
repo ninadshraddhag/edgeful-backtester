@@ -76,6 +76,14 @@ def load_facts_session(inst, session, ib_min, mtime):
     return out
 
 
+@st.cache_data(show_spinner=False)
+def _minute_and_open(inst, mtime):
+    """Cleaned minute frame + auto-detected open for the day-browser charts."""
+    path = data_store.discover()[inst]
+    mdf = build_facts.clean_min(data_store.read_minute(path))
+    return mdf, build_facts.detect_open_t(mdf)
+
+
 def build_facts_inline():
     build_facts.main()          # builds for every discovered instrument
 
@@ -368,49 +376,53 @@ def render():
     cc[1].metric("Breaks LOW first",  pct(s["first_low"]))
 
     # ── first-move-fades ──────────────────────────────────────────────────────
-    st.markdown("#### “First-move-fades” — what breaks given which extreme formed first")
+    st.markdown("#### “First-move-fades” — which side breaks FIRST, given which "
+                "extreme FORMED first")
+    st.caption("FORMED first = which extreme printed first inside the window "
+               "(formation). Breaks FIRST = which boundary was breached first "
+               "after the window. Only the breaks-first sequencing is shown.")
     hf = sub[sub[f"{tag}_first_side"] == "high"]
     lf = sub[sub[f"{tag}_first_side"] == "low"]
     fm = st.columns(2)
     with fm[0]:
         if len(hf):
-            fm[0].metric(f"HIGH first → LOW breaks  (n={len(hf):,})",
-                         pct(hf[f"{tag}_low_break"].mean()),
-                         f"low breaks first: {pct((hf[f'{tag}_break_first']=='low').mean())}")
+            fm[0].metric(f"HIGH formed first → LOW breaks FIRST  (n={len(hf):,})",
+                         pct((hf[f"{tag}_break_first"] == "low").mean()))
         else:
-            st.info("No 'high first' days in this slice.")
+            st.info("No 'high formed first' days in this slice.")
     with fm[1]:
         if len(lf):
-            fm[1].metric(f"LOW first → HIGH breaks  (n={len(lf):,})",
-                         pct(lf[f"{tag}_high_break"].mean()),
-                         f"high breaks first: {pct((lf[f'{tag}_break_first']=='high').mean())}")
+            fm[1].metric(f"LOW formed first → HIGH breaks FIRST  (n={len(lf):,})",
+                         pct((lf[f"{tag}_break_first"] == "high").mean()))
         else:
-            st.info("No 'low first' days in this slice.")
+            st.info("No 'low formed first' days in this slice.")
 
     # ── close vs midpoint (momentum confirmation) ─────────────────────────────
     st.markdown(f"#### {tag.upper()} close vs midpoint — confirmation of the fade")
     mid_col = f"{tag}_close_above_mid"
     if mid_col in sub.columns:
         # NB: local names must not shadow the baseline stats dict `b` used below
-        lf_conf = lf[lf[mid_col] == True]      # low first AND window closed above mid
-        hf_conf = hf[hf[mid_col] == False]     # high first AND window closed below mid
+        lf_conf = lf[lf[mid_col] == True]      # low formed first AND closed above mid
+        hf_conf = hf[hf[mid_col] == False]     # high formed first AND closed below mid
         mp = st.columns(2)
         with mp[0]:
             if len(lf_conf):
-                base_a = pct(lf[f"{tag}_high_break"].mean()) if len(lf) else "—"
-                mp[0].metric(f"LOW first + close ABOVE mid → HIGH breaks  (n={len(lf_conf):,})",
-                             pct(lf_conf[f"{tag}_high_break"].mean()),
-                             f"vs {base_a} for all low-first days")
+                base_a = pct((lf[f"{tag}_break_first"] == "high").mean()) if len(lf) else "—"
+                mp[0].metric("LOW formed first + close ABOVE mid → HIGH breaks FIRST  "
+                             f"(n={len(lf_conf):,})",
+                             pct((lf_conf[f"{tag}_break_first"] == "high").mean()),
+                             f"vs {base_a} for all low-formed-first days")
             else:
-                st.info("No days: low first + close above mid.")
+                st.info("No days: low formed first + close above mid.")
         with mp[1]:
             if len(hf_conf):
-                base_b = pct(hf[f"{tag}_low_break"].mean()) if len(hf) else "—"
-                mp[1].metric(f"HIGH first + close BELOW mid → LOW breaks  (n={len(hf_conf):,})",
-                             pct(hf_conf[f"{tag}_low_break"].mean()),
-                             f"vs {base_b} for all high-first days")
+                base_b = pct((hf[f"{tag}_break_first"] == "low").mean()) if len(hf) else "—"
+                mp[1].metric("HIGH formed first + close BELOW mid → LOW breaks FIRST  "
+                             f"(n={len(hf_conf):,})",
+                             pct((hf_conf[f"{tag}_break_first"] == "low").mean()),
+                             f"vs {base_b} for all high-formed-first days")
             else:
-                st.info("No days: high first + close below mid.")
+                st.info("No days: high formed first + close below mid.")
         st.caption(f"Close = last 1-min close of the {tag.upper()} window; midpoint = "
                    "(window high + low) / 2. Closing back beyond the midpoint confirms "
                    "the first move has already been faded.")
@@ -418,46 +430,44 @@ def render():
         st.info("Rebuild the facts table (`python build_facts.py`) to enable this stat.")
 
     # ── EXTENSIONS & RETRACEMENTS ─────────────────────────────────────────────
-    # Directionally conditioned so the numbers are interpretable: a BULL extension
-    # is only meaningful on days the HIGH broke FIRST (a genuine upside breakout),
-    # and a BEAR extension only on days the LOW broke first. Mixing both directions
-    # into one pool would dilute the reading. Retracements follow the same rule —
-    # a bull retracement (pullback after the high broke) is measured on high-first
-    # days, a bear retracement on low-first days.
+    # Measured ONLY on SINGLE-BREAK days — days where exactly ONE side of the
+    # window broke. Bull = only the HIGH broke (clean upside day), Bear = only
+    # the LOW broke. Both-sides chop days are excluded so the numbers describe
+    # genuine directional days.
     st.divider()
     st.markdown(f"#### Extensions & Retracements  ·  measured in × {tag.upper()} range")
-    hi_first = sub[sub[f"{tag}_break_first"] == "high"]
-    lo_first = sub[sub[f"{tag}_break_first"] == "low"]
-    n_hi, n_lo = len(hi_first), len(lo_first)
-    up_ext = hi_first[f"{tag}_up_ext"].dropna()
-    dn_ext = lo_first[f"{tag}_dn_ext"].dropna()
-    up_rt  = hi_first[f"{tag}_up_retr"].dropna()
-    dn_rt  = lo_first[f"{tag}_dn_retr"].dropna()
-    st.caption(f"Conditioned on which side broke **first** → "
-               f"**{n_hi:,}** high-first days (bull) · **{n_lo:,}** low-first days (bear), "
-               f"of {len(sub):,} in this slice.")
+    hi_only = sub[sub[f"{tag}_high_break"] & ~sub[f"{tag}_low_break"]]
+    lo_only = sub[sub[f"{tag}_low_break"] & ~sub[f"{tag}_high_break"]]
+    n_hi, n_lo = len(hi_only), len(lo_only)
+    up_ext = hi_only[f"{tag}_up_ext"].dropna()
+    dn_ext = lo_only[f"{tag}_dn_ext"].dropna()
+    up_rt  = hi_only[f"{tag}_up_retr"].dropna()
+    dn_rt  = lo_only[f"{tag}_dn_retr"].dropna()
+    st.caption(f"SINGLE-BREAK days only (exactly one side broke, no both-sides chop) → "
+               f"**{n_hi:,}** only-HIGH-broke days (bull) · **{n_lo:,}** only-LOW-broke "
+               f"days (bear), of {len(sub):,} days in this slice.")
 
     e = st.columns(4)
     e[0].metric(f"Bull ext ≥ {bull_ext:.2f}×",
                 pct((up_ext >= bull_ext).mean()) if len(up_ext) else "—",
-                f"of {n_hi:,} high-first days",
-                help="Given the HIGH broke first, P(price reaches "
-                     "range_high + level×range).")
+                f"of {n_hi:,} only-HIGH-broke days",
+                help="Given ONLY the high broke (single-break upside day), "
+                     "P(price reaches range_high + level×range).")
     e[1].metric(f"Bear ext ≥ {bear_ext:.2f}×",
                 pct((dn_ext >= bear_ext).mean()) if len(dn_ext) else "—",
-                f"of {n_lo:,} low-first days",
-                help="Given the LOW broke first, P(price reaches "
-                     "range_low − level×range).")
+                f"of {n_lo:,} only-LOW-broke days",
+                help="Given ONLY the low broke (single-break downside day), "
+                     "P(price reaches range_low − level×range).")
     e[2].metric(f"Bull retr ≥ {bull_retr:.2f}×",
                 pct((up_rt >= bull_retr).mean()) if len(up_rt) else "—",
-                f"of {len(up_rt):,} high-first days",
-                help="Given the HIGH broke first, P(pullback ≥ level×range below "
-                     "the high).")
+                f"of {len(up_rt):,} only-HIGH-broke days",
+                help="Given ONLY the high broke, P(pullback ≥ level×range back "
+                     "below the range high).")
     e[3].metric(f"Bear retr ≥ {bear_retr:.2f}×",
                 pct((dn_rt >= bear_retr).mean()) if len(dn_rt) else "—",
-                f"of {len(dn_rt):,} low-first days",
-                help="Given the LOW broke first, P(bounce ≥ level×range above "
-                     "the low).")
+                f"of {len(dn_rt):,} only-LOW-broke days",
+                help="Given ONLY the low broke, P(bounce ≥ level×range back "
+                     "above the range low).")
 
     # extension probability curve
     levels = np.round(np.arange(0.1, 2.01, 0.1), 2)
@@ -465,10 +475,10 @@ def render():
     bear_curve = [(dn_ext >= L).mean()*100 if len(dn_ext) else 0 for L in levels]
     fig_e = go.Figure()
     fig_e.add_scatter(x=levels, y=bull_curve, mode="lines+markers",
-                      name=f"Bull ext · high-first (n={n_hi:,})",
+                      name=f"Bull ext · only HIGH broke (n={n_hi:,})",
                       line=dict(color="#4CAF50", width=2))
     fig_e.add_scatter(x=levels, y=bear_curve, mode="lines+markers",
-                      name=f"Bear ext · low-first (n={n_lo:,})",
+                      name=f"Bear ext · only LOW broke (n={n_lo:,})",
                       line=dict(color="#F44336", width=2))
     fig_e.add_vline(x=bull_ext, line_dash="dot", line_color="#4CAF50")
     fig_e.add_vline(x=bear_ext, line_dash="dot", line_color="#F44336")
@@ -483,8 +493,10 @@ def render():
     st.divider()
     st.markdown("#### Previous-Day High / Low  (PDH / PDL)")
     st.caption("Same-session INTRADAY touches only — PDH/PDL = the PREVIOUS session's "
-               "high/low, measured until this session's close. Nothing carries beyond "
-               "the session. Responds to date & day-of-week filters.")
+               "high/low, measured until this session's close. TOUCH semantics: price "
+               "must actually TRADE AT the level that day — a day that opens beyond "
+               "PDH/PDL only counts after pulling back to touch it. Nothing carries "
+               "beyond the session. Responds to date & day-of-week filters.")
 
     pc = st.columns(3)
     # inside-day breakout: yesterday was an inside day
@@ -492,8 +504,8 @@ def render():
     with pc[0]:
         st.markdown("**Inside-day breakout** (prev day was inside)")
         if len(ins):
-            st.metric("Break PDH", pct(ins["broke_pdh"].mean()),
-                      f"break PDL: {pct(ins['broke_pdl'].mean())}")
+            st.metric("Touch PDH", pct(ins["broke_pdh"].mean()),
+                      f"touch PDL: {pct(ins['broke_pdl'].mean())}")
             st.caption(f"both: {pct(ins['broke_pd_both'].mean())} · "
                        f"neither: {pct(ins['broke_pd_none'].mean())} · n={len(ins):,}")
         else:
@@ -588,6 +600,137 @@ def render():
     st.download_button("⬇ Download matching days (CSV)",
                        sub[show_cols].to_csv(index=False).encode(),
                        file_name="prob_slice.csv", mime="text/csv")
+
+    # ── day browser: chart every matching day with its levels ────────────────
+    _render_day_browser(sub, inst, session, tag, ib_min)
+
+
+# ─── day browser ──────────────────────────────────────────────────────────────
+
+def _fmt_x(v, unit="×"):
+    return "—" if pd.isna(v) else f"{v:.2f}{unit}"
+
+
+def _render_day_browser(sub, inst, session, tag, ib_min):
+    """Step through every matching day with a clean candlestick chart + levels."""
+    st.divider()
+    st.markdown("#### 📅 Day browser — every matching day, charted with levels")
+    if sub.empty:
+        return
+
+    srt = sub.sort_values("date")
+    days = srt["date"].dt.date.tolist()
+    by_day = srt.set_index(srt["date"].dt.date)
+    day_dow = dict(zip(days, srt["dow"]))
+
+    path = data_store.discover().get(inst)
+    if not path or not os.path.exists(path):
+        st.info("Minute data for this instrument is not available — charts disabled.")
+        return
+    mdf, auto_open = _minute_and_open(inst, os.path.getmtime(path))
+
+    if data_store.has_sessions(inst):
+        sdef = data_store.SESSIONS_24H[session]
+        o, c = sdef["open_t"], sdef["close_t"]
+    else:
+        o = data_store.session_open(inst, auto_open)
+        c = data_store.session_close(inst, build_facts.DEFAULT_CLOSE_T)
+    cross = c < o                                   # session crosses midnight
+
+    key = f"brw_{inst}_{session}_{tag}"
+    if st.session_state.get(f"{key}_day") not in days:
+        st.session_state[f"{key}_day"] = days[-1]
+
+    nav = st.columns([1, 1, 4, 2])
+    cur = days.index(st.session_state[f"{key}_day"])
+    # buttons render BEFORE the selectbox, so writing its state here is legal
+    if nav[0].button("◀ Prev day", key=f"{key}_prev", disabled=(cur == 0),
+                     use_container_width=True):
+        st.session_state[f"{key}_day"] = days[max(cur - 1, 0)]
+    cur = days.index(st.session_state[f"{key}_day"])
+    if nav[1].button("Next day ▶", key=f"{key}_next", disabled=(cur == len(days) - 1),
+                     use_container_width=True):
+        st.session_state[f"{key}_day"] = days[min(cur + 1, len(days) - 1)]
+    nav[2].selectbox("Day", days, key=f"{key}_day",
+                     format_func=lambda d: f"{d}  ·  {day_dow.get(d, '')}",
+                     label_visibility="collapsed")
+    tf = nav[3].selectbox("Chart timeframe", [1, 5, 15], index=1,
+                          format_func=lambda x: f"{x}-min candles",
+                          key=f"{key}_tf", label_visibility="collapsed")
+
+    day = st.session_state[f"{key}_day"]
+    r = by_day.loc[day]
+    if isinstance(r, pd.DataFrame):
+        r = r.iloc[0]
+    cur = days.index(day)
+
+    d0 = pd.Timestamp(day)
+    start = (d0 - pd.Timedelta(days=1) if cross else d0) + pd.Timedelta(minutes=o)
+    end = d0 + pd.Timedelta(minutes=c)
+    g = mdf[(mdf["date"] >= start) & (mdf["date"] <= end)]
+    if g.empty:
+        st.warning("No minute data for this session.")
+        return
+    if tf > 1:
+        g = build_facts.to_timeframe(g, tf, open_t=o)
+
+    hi, lo = r[f"{tag}_high"], r[f"{tag}_low"]
+    rng = r[f"{tag}_range"]
+    fig = go.Figure(go.Candlestick(
+        x=g["date"], open=g["open"], high=g["high"], low=g["low"], close=g["close"],
+        increasing_line_color="#25F08A", decreasing_line_color="#FF5C5C",
+        increasing_fillcolor="rgba(37,240,138,0.9)",
+        decreasing_fillcolor="rgba(255,92,92,0.9)",
+        line=dict(width=1), name=""))
+
+    # levels — clipped to a sane band around the day's range so far-away levels
+    # (e.g. PDH on a big gap day) don't stretch the chart
+    lim_lo = float(g["low"].min()) - 1.0 * rng
+    lim_hi = float(g["high"].max()) + 1.0 * rng
+    win_lab = f"{tag.upper()}"
+    lines = [
+        (hi,            "#25F08A", "solid", f"{win_lab} High"),
+        (lo,            "#FF5C5C", "solid", f"{win_lab} Low"),
+        ((hi + lo) / 2, "#8b93a7", "dot",   "Mid"),
+        (hi + 0.5 * rng, "#1db06b", "dot",  "+0.5×"),
+        (hi + 1.0 * rng, "#1db06b", "dash", "+1.0×"),
+        (lo - 0.5 * rng, "#c74848", "dot",  "−0.5×"),
+        (lo - 1.0 * rng, "#c74848", "dash", "−1.0×"),
+    ]
+    if pd.notna(r.get("pdh")):
+        lines += [(r["pdh"], "#FFB74D", "dashdot", "PDH"),
+                  (r["pdl"], "#BA68C8", "dashdot", "PDL")]
+    for y, colr, dash, txt in lines:
+        if pd.isna(y) or not (lim_lo <= y <= lim_hi):
+            continue
+        fig.add_hline(y=y, line_color=colr, line_width=1, line_dash=dash,
+                      annotation_text=txt, annotation_position="right",
+                      annotation_font=dict(color=colr, size=11))
+
+    win_min = ib_min if tag == "ib" else 15
+    fig.add_vrect(x0=start, x1=start + pd.Timedelta(minutes=win_min),
+                  fillcolor="rgba(37,240,138,0.05)", line_width=0)
+
+    sess_bit = f" · {session} session" if data_store.has_sessions(inst) else ""
+    fig.update_layout(
+        title=f"{inst}{sess_bit} · {day} ({r['dow']})",
+        height=560, template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis_rangeslider_visible=False, showlegend=False,
+        margin=dict(t=48, b=10),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    gp = r.get("gap_pct")
+    st.caption(
+        f"Day **{cur + 1} of {len(days)}** matching days"
+        + (f" · gap {gp:+.2f}% ({r.get('gap_bucket', '—')})" if pd.notna(gp) else "")
+        + f" · formed first: **{str(r[f'{tag}_first_side']).upper()}**"
+        + f" · broke first: **{str(r[f'{tag}_break_first']).upper()}**"
+        + f" · up-ext {_fmt_x(r[f'{tag}_up_ext'])} · dn-ext {_fmt_x(r[f'{tag}_dn_ext'])}"
+        + f" · PDH {'touched' if r.get('broke_pdh') else 'not touched'}"
+        + f" · PDL {'touched' if r.get('broke_pdl') else 'not touched'}")
 
 
 def _standalone():

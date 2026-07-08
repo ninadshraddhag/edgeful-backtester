@@ -120,11 +120,16 @@ def _excursion(post, hi, lo, rng):
 
 
 def _pd_breaks(g, pdh, pdl):
-    """Did the full day break Previous-Day High / Low, and which first."""
+    """
+    Did TODAY (same session only) trade AT the Previous-Day High / Low, and
+    which level was touched first. TOUCH semantics: a candle must straddle the
+    level (low <= level <= high) — a day that OPENS beyond a level (e.g. gaps
+    above PDH) only counts if price comes back and actually trades at it.
+    """
     if pd.isna(pdh):
         return False, False, "none"
-    hi_mask = g["high"] > pdh
-    lo_mask = g["low"]  < pdl
+    hi_mask = (g["low"] <= pdh) & (g["high"] >= pdh)
+    lo_mask = (g["low"] <= pdl) & (g["high"] >= pdl)
     bh, bl = bool(hi_mask.any()), bool(lo_mask.any())
     t_h = g.loc[hi_mask, "t_min"].min() if bh else np.nan
     t_l = g.loc[lo_mask, "t_min"].min() if bl else np.nan
