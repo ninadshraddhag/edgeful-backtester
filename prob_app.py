@@ -167,6 +167,7 @@ def gap_pd_table(s):
             "Gap": gt, "days": len(x),
             "reach PDH %": round(x["broke_pdh"].mean()*100, 1),
             "reach PDL %": round(x["broke_pdl"].mean()*100, 1),
+            "either %":    round((x["broke_pdh"] | x["broke_pdl"]).mean()*100, 1),
             "both %":      round(x["broke_pd_both"].mean()*100, 1),
             "neither %":   round(x["broke_pd_none"].mean()*100, 1),
         })
@@ -513,7 +514,18 @@ def render():
                "high/low, measured until this session's close. TOUCH semantics: price "
                "must actually TRADE AT the level that day — a day that opens beyond "
                "PDH/PDL only counts after pulling back to touch it. Nothing carries "
-               "beyond the session. Responds to date & day-of-week filters.")
+               "beyond the session.")
+
+    # headline: PD-touch odds for the CURRENT slice (ALL sidebar filters applied)
+    _pd_e = (sub["broke_pdh"] | sub["broke_pdl"])
+    hp = st.columns(4)
+    hp[0].metric("Touch PDH", pct(sub["broke_pdh"].mean()))
+    hp[1].metric("Touch PDL", pct(sub["broke_pdl"].mean()))
+    hp[2].metric("Touch EITHER", pct(_pd_e.mean()),
+                 help="PDH or PDL (or both) touched within the same session.")
+    hp[3].metric("Touch NEITHER", pct(1 - _pd_e.mean()))
+    st.caption(f"Current slice ({len(sub):,} days — every sidebar filter applied). "
+               "The three setup cards below respond to date & day-of-week only.")
 
     pc = st.columns(3)
     # inside-day breakout: yesterday was an inside day
@@ -523,7 +535,8 @@ def render():
         if len(ins):
             st.metric("Touch PDH", pct(ins["broke_pdh"].mean()),
                       f"touch PDL: {pct(ins['broke_pdl'].mean())}")
-            st.caption(f"both: {pct(ins['broke_pd_both'].mean())} · "
+            st.caption(f"EITHER: {pct((ins['broke_pdh'] | ins['broke_pdl']).mean())} · "
+                       f"both: {pct(ins['broke_pd_both'].mean())} · "
                        f"neither: {pct(ins['broke_pd_none'].mean())} · n={len(ins):,}")
         else:
             st.info("No inside-day setups in this slice.")
@@ -581,6 +594,7 @@ def render():
             "NEITHER %":      round(x[f"{tag}_no_break"].mean() * 100, 1),
             "reach PDH %":    round(x["broke_pdh"].mean() * 100, 1),
             "reach PDL %":    round(x["broke_pdl"].mean() * 100, 1),
+            "PD either %":    round((x["broke_pdh"] | x["broke_pdl"]).mean() * 100, 1),
         })
     if bkt_rows:
         st.dataframe(pd.DataFrame(bkt_rows), use_container_width=True, hide_index=True)

@@ -786,11 +786,11 @@ def inject_style():
 def pct(x): return f"{x*100:.1f}%"
 
 EDGE_NOTE = """
-**Edges in play (10-yr, both indices):**
+**Edges in play (10-yr, both indices; PDH/PDL = same-day TOUCH):**
 - **First-move fade** — high-first → low breaks ~75% (IB) / ~87% (ORB); symmetric for low-first.
-- **Gap continuation** — Gap Up → reach PDH **77%**, Gap Down → reach PDL **83%**.
+- **Gap continuation** — Gap Up → touch PDH **~58%**, Gap Down → touch PDL **~58%**.
 - **Outside day** — strong downside follow-through (IB low breaks ~78%).
-- **Inside-day** — next day breaks PDH **62%** vs PDL 48%.
+- **Prev inside day** — touch PDH ~53% / PDL ~45%, **EITHER ~82%** (compression resolves).
 """
 
 
@@ -1693,9 +1693,12 @@ def _live_render(instrument, feat, probs, open_t):
         row = pdt[pdt["Gap"] == feat["gap_type"]]
         if not row.empty:
             r = row.iloc[0]
-            cc = st.columns(2)
-            cc[0].metric(f"{feat['gap_type']} → reach PDH", f"{r['reach PDH %']:.1f}%")
-            cc[1].metric(f"{feat['gap_type']} → reach PDL", f"{r['reach PDL %']:.1f}%")
+            cc = st.columns(3)
+            cc[0].metric(f"{feat['gap_type']} → touch PDH", f"{r['reach PDH %']:.1f}%")
+            cc[1].metric(f"{feat['gap_type']} → touch PDL", f"{r['reach PDL %']:.1f}%")
+            if "either %" in r.index:
+                cc[2].metric(f"{feat['gap_type']} → touch EITHER", f"{r['either %']:.1f}%",
+                             help="PDH or PDL (or both) touched the same session.")
 
     # ── today's levels + extension targets ────────────────────────────────────
     rows = []
