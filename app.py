@@ -775,12 +775,29 @@ SHARP_HEADER = """
 """
 
 
+@st.cache_resource(show_spinner=False)
+def _build_version():
+    """Short git hash + commit date of the running code — shown in the sidebar
+    so the local and cloud deployments can be compared at a glance."""
+    try:
+        import subprocess
+        h = subprocess.run(["git", "log", "-1", "--format=%h · %cd", "--date=format:%d %b %Y %H:%M"],
+                           capture_output=True, text=True, cwd=HERE, timeout=10)
+        v = h.stdout.strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    return "unknown build"
+
+
 def inject_style():
     """Global look & feel — called once per run, themes every mode."""
     st.markdown(APP_CSS, unsafe_allow_html=True)
     ui_theme.apply()          # scrollbars, dropdown menus, input borders
     with st.sidebar:
         st.markdown(BRAND_HTML, unsafe_allow_html=True)
+        st.caption(f"build {_build_version()}")
 
 
 def pct(x): return f"{x*100:.1f}%"
