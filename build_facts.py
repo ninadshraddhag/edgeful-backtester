@@ -121,15 +121,18 @@ def _excursion(post, hi, lo, rng):
 
 def _pd_breaks(g, pdh, pdl):
     """
-    Did TODAY (same session only) trade AT the Previous-Day High / Low, and
-    which level was touched first. TOUCH semantics: a candle must straddle the
-    level (low <= level <= high) — a day that OPENS beyond a level (e.g. gaps
-    above PDH) only counts if price comes back and actually trades at it.
+    Did TODAY (same session only) trade AT/THROUGH the Previous-Day High / Low,
+    and which level was reached first. TOUCH semantics via cumulative cross:
+    the level counts once the day's running range brackets it (price has been
+    on both sides → it traded through the level). A day that OPENS beyond a
+    level (e.g. gaps above PDH) only counts after pulling back to it. Robust
+    to fast markets where no single candle straddles the level.
     """
     if pd.isna(pdh):
         return False, False, "none"
-    hi_mask = (g["low"] <= pdh) & (g["high"] >= pdh)
-    lo_mask = (g["low"] <= pdl) & (g["high"] >= pdl)
+    cmh, cml = g["high"].cummax(), g["low"].cummin()
+    hi_mask = (cmh >= pdh) & (cml <= pdh)
+    lo_mask = (cmh >= pdl) & (cml <= pdl)
     bh, bl = bool(hi_mask.any()), bool(lo_mask.any())
     t_h = g.loc[hi_mask, "t_min"].min() if bh else np.nan
     t_l = g.loc[lo_mask, "t_min"].min() if bl else np.nan
@@ -245,6 +248,12 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
         # Previous-Day level breaks (today)
         broke_pdh, broke_pdl, pd_first = _pd_breaks(g, pdh, pdl)
 
+        # first-candle direction: close of the first N minutes vs session open
+        fc = {}
+        for nmin in (15, 30, 60):
+            w = g[g["t_min"] <= open_t + nmin - 1]
+            fc[nmin] = bool(w.iloc[-1]["close"] > day_open) if len(w) else False
+
         rec = {
             "instrument": name,
             "date": pd.Timestamp(day),
@@ -262,6 +271,7 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
             "broke_pd_both": broke_pdh and broke_pdl,
             "broke_pd_none": (not broke_pdh) and (not broke_pdl),
             "broke_pd_first": pd_first,
+            "first15_bull": fc[15], "first30_bull": fc[30], "first60_bull": fc[60],
         }
 
         for tag, win, end_t in (("orb", orb, orb_end), ("ib", ib, ib_end)):
@@ -335,9 +345,14 @@ def build_session_facts(df, name, session, orb_min=ORB_MIN, ib_min=IB_MIN):
 def build_instrument(name, path, open_t=None, close_t=None):
     print(f"\n[{name}] reading {path} ...")
     df = clean_min(data_store.read_minute(path))
-    # session times: explicit arg > stored override (e.g. NQ 09:30/16:00 ET) > default
-    ot = open_t if open_t is not None else data_store.session_open(name, detect_open_t(df))
-    ct = close_t if close_t is not None else data_store.session_close(name, DEFAULT_CLOSE_T)
+    # session times: explicit arg > CODE defaults > auto-detect.
+    # The instruments.json override layer is deliberately IGNORED here — stale
+    # UI overrides have twice poisoned the canonical facts table (NQ built on
+    # 03:00-07:00, XAUUSD truncated at noon). facts.csv must always reflect the
+    # canonical sessions in data_store.SESSION_DEFAULTS.
+    d = data_store.SESSION_DEFAULTS.get(name, {})
+    ot = open_t if open_t is not None else d.get("open_t", detect_open_t(df))
+    ct = close_t if close_t is not None else d.get("close_t", DEFAULT_CLOSE_T)
     print(f"   {len(df):,} candles over {df['date_only'].nunique():,} days; "
           f"open={ot} close={ct}")
     out = build_from_minute(df, name, ot, ct)

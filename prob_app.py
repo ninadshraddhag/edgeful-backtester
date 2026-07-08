@@ -288,6 +288,15 @@ def render():
         st.radio("Which extreme formed first",
                  ["Either", "High formed first", "Low formed first"], key="f_first")
 
+        fcc = st.columns([1, 1.4])
+        fc_dur = fcc[0].selectbox("First candle", [15, 30, 60], index=1,
+                                  format_func=lambda x: f"{x} min", key="f_fc_dur")
+        fc_dir = fcc[1].radio("Direction", ["Any", "Bullish", "Bearish"],
+                              key="f_fc_dir", horizontal=True,
+                              help="Filter by the direction of the session's first "
+                                   "candle (close of the first N minutes vs the open). "
+                                   "E.g. first 30-min candle bullish → long-bias days only.")
+
         st.divider()
         size_col = f"{tag}_range"
         # IB/ORB size as a % of price (volatility-normalized, comparable across
@@ -329,6 +338,13 @@ def render():
         sub = sub[sub[f"{tag}_first_side"] == "high"]
     elif st.session_state["f_first"] == "Low formed first":
         sub = sub[sub[f"{tag}_first_side"] == "low"]
+    fc_col = f"first{fc_dur}_bull"
+    if fc_dir != "Any":
+        if fc_col in sub.columns:
+            sub = sub[sub[fc_col] == (fc_dir == "Bullish")]
+        else:
+            st.warning("First-candle data missing — rebuild the facts table "
+                       "(`python build_facts.py`) to enable this filter.")
     _sz_pct = sub[size_col] / sub["day_open"] * 100
     sub = sub[(_sz_pct >= size_rng[0]) & (_sz_pct <= size_rng[1])]
     sub_all_buckets = sub.copy()                 # for the per-bucket breakdown table
@@ -349,6 +365,7 @@ def render():
         bits.append("gap " + " / ".join(sel_buckets))
     if len(st.session_state["f_kind"]) < 3: bits.append("/".join(st.session_state["f_kind"]))
     if st.session_state["f_first"] != "Either": bits.append(st.session_state["f_first"])
+    if fc_dir != "Any": bits.append(f"first {fc_dur}m {fc_dir.lower()}")
     st.subheader("  ·  ".join(str(b) for b in bits))
 
     s = stats(sub, tag)
@@ -510,22 +527,36 @@ def render():
                        f"neither: {pct(ins['broke_pd_none'].mean())} · n={len(ins):,}")
         else:
             st.info("No inside-day setups in this slice.")
-    # gap up → reach PDH
+    # gap up → touch PDH
     gu = pdset[pdset["gap_type"] == "Gap Up"]
     with pc[1]:
-        st.markdown("**Gap Up → reach PDH**")
+        st.markdown("**Gap Up → touch PDH**")
         if len(gu):
-            st.metric("Reach PDH", pct(gu["broke_pdh"].mean()), f"n={len(gu):,}")
-            st.caption(f"also reach PDL same day: {pct(gu['broke_pdl'].mean())}")
+            st.metric("Touch PDH", pct(gu["broke_pdh"].mean()), f"n={len(gu):,}",
+                      help="Price trades AT the level the same session (touch). "
+                           "A day opening above PDH only counts after pulling back.")
+            above = gu[gu["day_open"] > gu["pdh"]]
+            below = gu[gu["day_open"] <= gu["pdh"]]
+            st.caption(
+                f"opens ABOVE PDH: {pct(len(above)/len(gu))}"
+                + (f" → pulls back to touch: {pct(above['broke_pdh'].mean())}" if len(above) else "")
+                + (f" · opens below → rallies to touch: {pct(below['broke_pdh'].mean())}" if len(below) else ""))
         else:
             st.info("No Gap Up days in this slice.")
-    # gap down → reach PDL
+    # gap down → touch PDL
     gd = pdset[pdset["gap_type"] == "Gap Down"]
     with pc[2]:
-        st.markdown("**Gap Down → reach PDL**")
+        st.markdown("**Gap Down → touch PDL**")
         if len(gd):
-            st.metric("Reach PDL", pct(gd["broke_pdl"].mean()), f"n={len(gd):,}")
-            st.caption(f"also reach PDH same day: {pct(gd['broke_pdh'].mean())}")
+            st.metric("Touch PDL", pct(gd["broke_pdl"].mean()), f"n={len(gd):,}",
+                      help="Price trades AT the level the same session (touch). "
+                           "A day opening below PDL only counts after bouncing back.")
+            belowL = gd[gd["day_open"] < gd["pdl"]]
+            aboveL = gd[gd["day_open"] >= gd["pdl"]]
+            st.caption(
+                f"opens BELOW PDL: {pct(len(belowL)/len(gd))}"
+                + (f" → bounces to touch: {pct(belowL['broke_pdl'].mean())}" if len(belowL) else "")
+                + (f" · opens above → drops to touch: {pct(aboveL['broke_pdl'].mean())}" if len(aboveL) else ""))
         else:
             st.info("No Gap Down days in this slice.")
 
@@ -633,8 +664,10 @@ def _render_day_browser(sub, inst, session, tag, ib_min):
         sdef = data_store.SESSIONS_24H[session]
         o, c = sdef["open_t"], sdef["close_t"]
     else:
-        o = data_store.session_open(inst, auto_open)
-        c = data_store.session_close(inst, build_facts.DEFAULT_CLOSE_T)
+        # canonical times only (same resolution as build_facts.build_instrument)
+        d = data_store.SESSION_DEFAULTS.get(inst, {})
+        o = d.get("open_t", auto_open)
+        c = d.get("close_t", build_facts.DEFAULT_CLOSE_T)
     cross = c < o                                   # session crosses midnight
 
     key = f"brw_{inst}_{session}_{tag}"
