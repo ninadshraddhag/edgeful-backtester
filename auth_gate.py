@@ -6,9 +6,18 @@ Google as the sole provider. Configuration lives in secrets ([auth] block —
 see SETUP_PUBLIC.md). When no [auth] secrets exist (local dev), the gate
 degrades to DEV MODE: no login screen, the admin email is assumed.
 """
+import os
+import sys
+
 import streamlit as st
 
 DEV_EMAIL = "ninadshraddhag@gmail.com"
+
+# Streamlit Community Cloud runs the repo from /mount/src on Linux. The owner's
+# dev machine is Windows — so "no auth secrets" means DEV MODE locally, but on
+# the cloud it means the platform hasn't been activated yet and must NOT fall
+# through to an open, everyone-is-admin app.
+IS_CLOUD = os.path.exists("/mount/src") or (not sys.platform.startswith("win"))
 
 
 def auth_configured() -> bool:
@@ -25,6 +34,15 @@ def require_login(brand_html: str | None = None) -> tuple[str, bool]:
     visitor is not signed in.
     """
     if not auth_configured():
+        if IS_CLOUD:
+            if brand_html:
+                st.markdown(brand_html, unsafe_allow_html=True)
+            st.warning("🔒 **Sign-in is being set up.** The platform opens to "
+                       "the public as soon as Google login is activated — "
+                       "check back shortly.")
+            st.caption("Owner: complete SETUP_PUBLIC.md (Google OAuth client + "
+                       "Supabase + Streamlit secrets), then reboot the app.")
+            st.stop()
         st.session_state["user_email"] = DEV_EMAIL
         return DEV_EMAIL, True
 

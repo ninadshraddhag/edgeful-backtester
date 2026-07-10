@@ -2979,8 +2979,11 @@ def main():
     st.session_state["user_email"] = email
     onboarding.maybe_welcome(email, user)
     with st.sidebar:
-        bal = st.session_state.get("credit_balance", user.get("credits", 0))
-        who = "👑 admin" if credits.is_admin(email) else f"💳 {bal} credits"
+        if credits.is_admin(email):
+            who = "👑 admin · <b style='color:#25F08A'>∞ unlimited backtests</b>"
+        else:
+            bal = st.session_state.get("credit_balance", user.get("credits", 0))
+            who = f"💳 <b style='color:#ECEDEF'>{bal}</b> credits (1 per backtest run)"
         st.markdown(
             f"<div style='font-size:0.85em;color:#9aa2b1;line-height:1.5'>"
             f"Signed in: <b style='color:#ECEDEF'>{email}</b><br>{who}"
