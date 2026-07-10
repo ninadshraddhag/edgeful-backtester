@@ -28,6 +28,10 @@ import daywise
 import ib50
 import prob_app
 import ui_theme
+import auth_gate
+import credits
+import admin_panel
+import onboarding
 import build_facts
 import data_store
 import live_feed
@@ -1173,9 +1177,10 @@ def daywise_mode():
             _dw_weekday_panel(day)
 
     st.divider()
-    run = st.button("▶ Run day-wise backtest", type="primary")
+    run = st.button("▶ Run day-wise backtest", type="primary",
+                    help="Runs the full backtest with the settings above. Costs 1 credit.")
 
-    if run:
+    if run and credits.try_charge("daywise_run"):
         configs = _dw_read_config()
         presets["last"] = configs          # auto-persist most recent config
         _save_presets(presets)
@@ -1213,10 +1218,11 @@ def daywise_mode():
         opt_min = oc[2].number_input("Min trades", 20, 1000, 100, 10, key="dw_opt_min")
         opt_dirs = oc[3].multiselect("Directions", ["long", "short"],
                                      default=["long", "short"], key="dw_opt_dirs")
-        if st.button("🔎 Optimize this weekday", key="dw_opt_run"):
+        if st.button("🔎 Optimize this weekday", key="dw_opt_run",
+                     help="Sweeps every entry/stop/target combo for this weekday. Costs 1 credit."):
             if not opt_dirs:
                 st.warning("Pick at least one direction.")
-            else:
+            elif credits.try_charge("daywise_optimizer"):
                 with st.spinner(f"Sweeping {opt_day} configurations…"):
                     res = daywise.optimize_weekday(
                         prepped[opt_day], opt_dirs, daywise.OPT_GRID,
@@ -1260,10 +1266,11 @@ def daywise_mode():
                                      key="dw_co_min")
         co_dirs = oc2[2].multiselect("Directions", ["long", "short"],
                                      default=["long", "short"], key="dw_co_dirs")
-        if st.button("🔎 Optimize all 5 weekdays (~1 min)", key="dw_co_run"):
+        if st.button("🔎 Optimize all 5 weekdays (~1 min)", key="dw_co_run",
+                     help="Runs the per-weekday sweep for every weekday at once. Costs 1 credit."):
             if not co_dirs:
                 st.warning("Pick at least one direction.")
-            else:
+            elif credits.try_charge("daywise_combined_optimizer"):
                 prog = st.progress(0.0, text="Optimizing weekdays…")
                 rows = []
                 for i, day in enumerate(daywise.WEEKDAYS):
@@ -2748,10 +2755,11 @@ def ib50_mode():
                        f"re-simulates {len(prep):,} days — for big sweeps, narrow the "
                        f"**date range** in the sidebar to keep it fast.")
 
-        if st.button("🔎 Run optimization", type="primary", key="ib50_opt_run"):
+        if st.button("🔎 Run optimization", type="primary", key="ib50_opt_run",
+                     help="Sweeps the whole entry/stop/target grid. Costs 1 credit."):
             if not (eg and sg and tg):
                 st.warning("Pick at least one value in each grid.")
-            else:
+            elif credits.try_charge("ib50_optimizer"):
                 grid = dict(entry=sorted(eg), stop=sorted(sg), target=sorted(tg))
                 prog = st.progress(0.0, text="Sweeping…")
 
@@ -2964,6 +2972,23 @@ def live_mode():
 
 def main():
     inject_style()
+
+    # ── public gate: Google sign-in + per-user credits ────────────────────────
+    email, dev_mode = auth_gate.require_login(SHARP_HEADER)
+    user = credits.ensure_user(email)
+    st.session_state["user_email"] = email
+    onboarding.maybe_welcome(email, user)
+    with st.sidebar:
+        bal = st.session_state.get("credit_balance", user.get("credits", 0))
+        who = "👑 admin" if credits.is_admin(email) else f"💳 {bal} credits"
+        st.markdown(
+            f"<div style='font-size:0.85em;color:#9aa2b1;line-height:1.5'>"
+            f"Signed in: <b style='color:#ECEDEF'>{email}</b><br>{who}"
+            + (" · <span style='color:#FFB74D'>DEV MODE — auth off</span>" if dev_mode else "")
+            + "</div>", unsafe_allow_html=True)
+        auth_gate.logout_button()
+        st.divider()
+
     if not os.path.exists(FACTS):
         # first boot (e.g. fresh clone / Streamlit Cloud): build the facts
         # table from whatever instruments are available, instead of erroring.
@@ -2978,30 +3003,43 @@ def main():
             build_facts.main()
         st.rerun()
 
-    mode = st.sidebar.radio(
-        "Mode",
-        ["Edge Backtester", "Day-wise IB Retracement", "IB50",
-         "Advanced Backtesting", "Probabilities", "Live Market Statistics"],
-        key="app_mode")
+    modes = ["Edge Backtester", "Day-wise IB Retracement", "IB50",
+             "Advanced Backtesting", "Probabilities", "Live Market Statistics",
+             "📖 Guide & Glossary"]
+    if credits.is_admin(email):
+        modes.append("👑 Admin")
+    mode = st.sidebar.radio("Mode", modes, key="app_mode")
     st.sidebar.divider()
+    if mode == "👑 Admin":
+        admin_panel.render(email)
+        return
+    if mode == "📖 Guide & Glossary":
+        onboarding.guide_page()
+        return
     if mode == "Probabilities":
+        onboarding.mode_guide("Probabilities")
         prob_app.render()
         return
     if mode == "Live Market Statistics":
+        onboarding.mode_guide("Live Market Statistics")
         live_mode()
         return
     if mode == "Advanced Backtesting":
         import advanced_mode
+        onboarding.mode_guide("Advanced Backtesting")
         advanced_mode.render()
         return
 
     st.markdown(SHARP_HEADER, unsafe_allow_html=True)
     if mode == "Day-wise IB Retracement":
+        onboarding.mode_guide("Day-wise IB Retracement")
         daywise_mode()
         return
     if mode == "IB50":
+        onboarding.mode_guide("IB50")
         ib50_mode()
         return
+    onboarding.mode_guide("Edge Backtester")
 
     st.caption("Trades the probability edges · targets & stops in × opening-range · "
                "permutation optimizer to find the best configuration")
@@ -3121,7 +3159,9 @@ def main():
         sweep_kind  = o2[1].checkbox("Sweep day kind", value=True)
         sweep_first = o2[2].checkbox("Sweep first-side", value=True)
 
-        if st.button("🔎 Run optimization", type="primary"):
+        if st.button("🔎 Run optimization", type="primary",
+                     help="Evaluates every permutation of the sweeps above. Costs 1 credit.") \
+                and credits.try_charge("edge_optimizer"):
             gap_opts   = [None, "Gap Up", "Gap Down", "Flat"] if sweep_gap else [None]
             kind_opts  = [None, "Inside Day", "Outside Day", "Normal"] if sweep_kind else [None]
             first_opts = ["", "high", "low"] if sweep_first else [""]

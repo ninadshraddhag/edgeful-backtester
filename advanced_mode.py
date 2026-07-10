@@ -639,9 +639,13 @@ def _optimizer(X, strategy, close_t):
     sw_kind = o2[1].checkbox("Sweep prev-day kind", value=True, key="adv_opt_k")
     sw_dow = o2[2].checkbox("Sweep weekday", value=False, key="adv_opt_d")
 
-    if st.button("🔎 Run optimization", key="adv_opt_run"):
+    if st.button("🔎 Run optimization", key="adv_opt_run",
+                 help="Sweeps every target/stop (and optional filter) combo. Costs 1 credit."):
         if not tp_grid or not sl_grid:
             st.warning("Pick at least one target and one stop type.")
+            return
+        import credits
+        if not credits.try_charge("advanced_optimizer"):
             return
         prog = st.progress(0.0, text="Sweeping configurations…")
 
@@ -771,10 +775,14 @@ def render(*_):
         "risk": dict(capital=float(capital), risk_pct=float(risk_pct)),
     }
 
-    run = st.button("▶ Run backtest", type="primary", use_container_width=True)
+    run = st.button("▶ Run backtest", type="primary", use_container_width=True,
+                    help="Runs the strategy over the full date range. Costs 1 credit.")
     if run:
         if not entry_conds:
             st.warning("Add at least one entry condition.")
+            st.stop()
+        import credits
+        if not credits.try_charge("advanced_run"):
             st.stop()
         params = _collect_params(settings, entry_conds, exit_conds)
         sig = tuple(sorted(params.items()))
