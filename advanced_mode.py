@@ -117,13 +117,20 @@ def _data_sidebar():
         st.error("No instrument data found — add a *_minute.csv/.parquet to data/.")
         st.stop()
     instrument = st.selectbox("Instrument", names + ["➕ Upload new instrument…"],
-                              key="adv_inst")
+                              key="adv_inst",
+                              help="Pick the market to test. NQ is Nasdaq futures; "
+                                   "XAUUSD is gold; NIFTY 50 / BANK NIFTY are Indian "
+                                   "indices.")
 
     if instrument == "➕ Upload new instrument…":
-        nm = st.text_input("Instrument name (e.g. XAUUSD, NQ)", key="adv_nm")
+        nm = st.text_input("Instrument name (e.g. XAUUSD, NQ)", key="adv_nm",
+                           help="Short name for the market you are adding, "
+                                "e.g. XAUUSD or NQ.")
         f = st.file_uploader("Minute CSV — date, open, high, low, close "
                              "(timestamps in exchange-local time, e.g. EST for NQ)",
-                             type="csv", key="adv_nf")
+                             type="csv", key="adv_nf",
+                             help="Upload a minute-bar CSV with columns date, open, "
+                                  "high, low, close, in exchange-local time.")
         if nm and f is not None:
             data_store.save_upload(nm.strip(), f.getbuffer())
             st.success(f"Added {nm.strip()} — available in every mode.")
@@ -155,7 +162,10 @@ def _data_sidebar():
     if close_t != cur_c:
         data_store.set_close_override(instrument, close_t, default_close)
     dr = st.date_input("Date range", value=(dmin, dmax),
-                       min_value=dmin, max_value=dmax, key="adv_dates")
+                       min_value=dmin, max_value=dmax, key="adv_dates",
+                       help="Limit the backtest to these dates. Features get a "
+                            "90-day warm-up before the start so indicators are "
+                            "primed.")
     d0, d1 = (dr if isinstance(dr, (tuple, list)) and len(dr) == 2 else (dmin, dmax))
     st.caption(f"Session open **{open_t//60:02d}:{open_t%60:02d}**"
                f"{' (auto)' if open_t == auto_t else ' (override)'} · "
@@ -175,12 +185,18 @@ def _settings_sidebar():
     c = st.columns(2)
     cpr_narrow = c[0].number_input("NARROW < %", 0.01, 5.0, 0.30, 0.05, key="adv_cprn",
                                    help="CPR width below this % of price → NARROW.")
-    cpr_wide = c[1].number_input("WIDE > %", 0.05, 10.0, 0.75, 0.05, key="adv_cprw")
-    cpr_period = st.selectbox("CPR basis", ["Daily", "Weekly"], key="adv_cprb")
+    cpr_wide = c[1].number_input("WIDE > %", 0.05, 10.0, 0.75, 0.05, key="adv_cprw",
+                                 help="Central Pivot Range wider than this % of price "
+                                      "counts as WIDE (a volatile, trending day type).")
+    cpr_period = st.selectbox("CPR basis", ["Daily", "Weekly"], key="adv_cprb",
+                              help="Whether the Central Pivot Range is built from the "
+                                   "previous Day or previous Week.")
 
     st.header("Detection")
     c2 = st.columns(2)
-    atr_period = c2[0].number_input("ATR period (days)", 2, 100, 14, key="adv_atrp")
+    atr_period = c2[0].number_input("ATR period (days)", 2, 100, 14, key="adv_atrp",
+                                    help="Number of days used to measure Average True "
+                                         "Range (typical daily move). 14 is standard.")
     fvg_min = c2[1].number_input("FVG min gap %", 0.0, 5.0, 0.0, 0.01, key="adv_fvgm",
                                  help="Ignore imbalances smaller than this % of price.")
     return dict(exec_tf=exec_tf, htf_tf=htf_tf, cpr_period=cpr_period,

@@ -835,13 +835,20 @@ def data_sidebar(key):
     paths = data_store.discover()
     names = list(paths.keys())
     choice = st.selectbox("Instrument", names + ["➕ Upload new instrument…"],
-                          key=f"{key}_inst")
+                          key=f"{key}_inst",
+                          help="Pick the market to test. NIFTY 50 / BANK NIFTY are "
+                               "Indian indices; NQ is Nasdaq futures; XAUUSD is gold.")
 
     if choice == "➕ Upload new instrument…":
-        nm = st.text_input("Instrument name (e.g. XAUUSD, NQ)", key=f"{key}_nm")
+        nm = st.text_input("Instrument name (e.g. XAUUSD, NQ)", key=f"{key}_nm",
+                           help="Short name for the market you are adding, "
+                                "e.g. XAUUSD or NQ.")
         f  = st.file_uploader("Minute CSV — columns: date, open, high, low, close. "
                               "Timestamps in EXCHANGE-LOCAL time (e.g. EST for NQ).",
-                              type="csv", key=f"{key}_nf")
+                              type="csv", key=f"{key}_nf",
+                              help="Upload a minute-bar CSV with columns date, open, "
+                                   "high, low, close. Use exchange-local timestamps "
+                                   "(e.g. US Eastern for NQ).")
         if nm and f is not None:
             data_store.save_upload(nm.strip(), f.getbuffer())
             st.success(f"Added {nm.strip()} — it is now available in every mode. "
@@ -889,7 +896,10 @@ def data_sidebar(key):
 
     dmin, dmax = get_date_bounds(mpath, mtime)
     dr = st.date_input("Date range", value=(dmin, dmax),
-                       min_value=dmin, max_value=dmax, key=f"{key}_dates")
+                       min_value=dmin, max_value=dmax, key=f"{key}_dates",
+                       help="Limit the backtest to these dates. Tip: tune on an "
+                            "earlier range, then confirm the edge still works on "
+                            "a later, untouched range.")
     d0, d1 = (dr if isinstance(dr, (tuple, list)) and len(dr) == 2 else (dmin, dmax))
     return choice, mpath, mtime, open_t, close_t, ib_min, (d0, d1)
 
@@ -2803,9 +2813,13 @@ def live_mode():
                  "3 years": 36, "5 years": 60, "All history": None}
     with st.sidebar:
         st.header("Live data")
-        source_kind = st.radio("Source", ["Demo replay", "Kotak Neo (live)"], key="live_src")
+        source_kind = st.radio("Source", ["Demo replay", "Kotak Neo (live)"], key="live_src",
+                               help="Demo replay steps through any past day; Kotak Neo "
+                                    "streams a live feed once you log in.")
         live_paths = data_store.discover()
-        instrument = st.selectbox("Instrument", list(live_paths.keys()), key="live_inst")
+        instrument = st.selectbox("Instrument", list(live_paths.keys()), key="live_inst",
+                                  help="Market to classify live. Its 10-year history "
+                                       "supplies the conditional probabilities.")
         mpath = live_paths[instrument]
         mtime = os.path.getmtime(mpath)
         open_t = data_store.session_open(instrument, get_open_t(mpath, mtime))
@@ -2831,17 +2845,23 @@ def live_mode():
                 st.markdown("**Kotak Neo credentials**")
                 ckey = st.text_input("Consumer Key",
                                      value=cfg["kotak"].get("consumer_key", ""),
-                                     key="kotak_ckey")
+                                     key="kotak_ckey",
+                                     help="Your Kotak Neo API Consumer Key from the "
+                                          "developer portal.")
                 csec = st.text_input("Consumer Secret",
                                      value=cfg["kotak"].get("consumer_secret", ""),
-                                     type="password", key="kotak_csec")
+                                     type="password", key="kotak_csec",
+                                     help="Your Kotak Neo API Consumer Secret. Kept "
+                                          "only to log you in.")
                 mob = st.text_input("Registered mobile",
                                     value=cfg["kotak"].get("mobile", ""),
                                     key="kotak_mob",
                                     help="The mobile number registered with your Kotak account.")
                 pwd = st.text_input("Trading password",
                                     value=cfg["kotak"].get("password", ""),
-                                    type="password", key="kotak_pwd")
+                                    type="password", key="kotak_pwd",
+                                    help="Your Kotak Neo account trading password. "
+                                         "Used only to request a login OTP.")
                 if st.button("💾 Save & Login (sends OTP)"):
                     cfg["kotak"] = {"consumer_key": ckey.strip(),
                                     "consumer_secret": csec.strip(),
@@ -2869,7 +2889,9 @@ def live_mode():
 
             elif auth_state == "otp_sent":
                 st.info("OTP sent to your registered mobile.")
-                otp = st.text_input("Enter OTP", key="kotak_otp", max_chars=6)
+                otp = st.text_input("Enter OTP", key="kotak_otp", max_chars=6,
+                                    help="The one-time passcode texted to your "
+                                         "registered mobile.")
                 col_a, col_b = st.columns(2)
                 if col_a.button("✅ Verify OTP"):
                     _client = st.session_state.get("kotak_client")
@@ -2903,9 +2925,12 @@ def live_mode():
             full = load_min(mpath, mtime)
             days = sorted(full["date_only"].unique())
             asof_date = st.date_input("Replay date", value=days[-1],
-                                      min_value=days[0], max_value=days[-1], key="live_date")
+                                      min_value=days[0], max_value=days[-1], key="live_date",
+                                      help="The past day to replay minute by minute.")
             asof_t = st.slider("As-of time (minute of day)", open_t, 15 * 60 + 15,
-                               11 * 60, 5, key="live_asof")
+                               11 * 60, 5, key="live_asof",
+                               help="Pretend it is this time of day — the panel shows "
+                                    "only data up to here, with no look-ahead.")
             st.caption(f"Replaying up to {asof_t//60:02d}:{asof_t%60:02d}")
             auto = False
 
@@ -3049,7 +3074,10 @@ def main():
 
     with st.sidebar:
         instrument, mpath, mtime, open_t, close_t, ib_min, (d0, d1) = data_sidebar("edge")
-        setup = st.radio("Setup", [f"IB ({ib_min} min)", "ORB (15 min)"])
+        setup = st.radio("Setup", [f"IB ({ib_min} min)", "ORB (15 min)"],
+                         help="IB uses the first hour as the opening range; ORB uses "
+                              "just the first 15 minutes — faster and more frequent "
+                              "signals.")
         tag = "ib" if setup.startswith("IB") else "orb"
         st.markdown(EDGE_NOTE)
 

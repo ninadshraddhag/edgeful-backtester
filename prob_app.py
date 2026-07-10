@@ -230,7 +230,9 @@ def render():
         instruments = sorted(df["instrument"].unique())   # every instrument in facts
         if st.session_state.get("f_instrument") not in instruments:
             st.session_state["f_instrument"] = instruments[0]
-        st.radio("Instrument", instruments, key="f_instrument")
+        st.radio("Instrument", instruments, key="f_instrument",
+                 help="Choose the market to analyse. NQ and XAUUSD also offer named "
+                      "sessions (New York, London, Asia, Globex).")
         inst = st.session_state["f_instrument"]
 
         # session picker — 24-hour instruments only (NQ / XAUUSD)
@@ -248,7 +250,9 @@ def render():
                      "as Monday. Gap % is measured vs the SAME session's previous "
                      "close (London vs London, Asia vs Asia).")
 
-        st.radio("Setup", ["IB", "ORB (15 min)"], key="f_setup")
+        st.radio("Setup", ["IB", "ORB (15 min)"], key="f_setup",
+                 help="IB uses the first hour as the opening range; ORB uses only "
+                      "the first 15 minutes.")
         st.number_input("IB duration (min)", 10, 240, step=10, key="f_ibmin",
                         help="Length of the Initial Balance window from the open, in "
                              "10-min steps (e.g. 40, 50). Non-60 values recompute the "
@@ -275,23 +279,37 @@ def render():
         dmax = df_inst["date"].max().date()
         date_sel = st.date_input("Date range", value=(dmin, dmax),
                                  min_value=dmin, max_value=dmax,
-                                 key=f"f_dates_{inst}_{session}")
+                                 key=f"f_dates_{inst}_{session}",
+                                 help="Only days in this range feed the probabilities. "
+                                      "Compare an earlier range with a later one to "
+                                      "see if an edge is stable.")
 
-        st.multiselect("Day of week", DOW_ORDER, key="f_dow")
-        st.multiselect("Gap type", GAP_ORDER, key="f_gap")
+        st.multiselect("Day of week", DOW_ORDER, key="f_dow",
+                       help="Keep only these weekdays. Deselect days to see whether "
+                            "the edge is specific to certain days.")
+        st.multiselect("Gap type", GAP_ORDER, key="f_gap",
+                       help="Keep only Gap Up, Flat or Gap Down opens (a gap is where "
+                            "today opens away from the previous close).")
         sel_buckets = st.multiselect(
             "Gap % bucket", GAP_BUCKETS, default=GAP_BUCKETS,
             key=f"f_gapbucket_{inst}_{session}",
             help="Opening gap vs the previous session's close, in clean bands "
                  "(±0–0.2% · 0.2–0.5% · 0.5–1% · 1%+). Deselect bands to focus — "
                  "e.g. keep only '+0.2% to +0.5%' for small gap-ups.")
-        st.multiselect("Day kind", KIND_ORDER, key="f_kind")
+        st.multiselect("Day kind", KIND_ORDER, key="f_kind",
+                       help="Keep only Inside days (inside yesterday's range), Outside "
+                            "days (beyond both ends) or Normal days.")
         st.radio("Which extreme formed first",
-                 ["Either", "High formed first", "Low formed first"], key="f_first")
+                 ["Either", "High formed first", "Low formed first"], key="f_first",
+                 help="Keep only days where the opening-box high, or the low, printed "
+                      "first — the basis of the first-move-fade edge.")
 
         fcc = st.columns([1, 1.4])
         fc_dur = fcc[0].selectbox("First candle", [15, 30, 60], index=1,
-                                  format_func=lambda x: f"{x} min", key="f_fc_dur")
+                                  format_func=lambda x: f"{x} min", key="f_fc_dur",
+                                  help="Length of the session's first candle used by "
+                                       "the Direction filter beside it (15, 30 or 60 "
+                                       "minutes).")
         fc_dir = fcc[1].radio("Direction", ["Any", "Bullish", "Bearish"],
                               key="f_fc_dir", horizontal=True,
                               help="Filter by the direction of the session's first "
@@ -313,10 +331,22 @@ def render():
 
         st.divider()
         st.markdown("**Extension / Retracement (× range)**")
-        bull_ext  = st.slider("Bull extension level",  0.1, 2.0, 0.5, 0.05, key="f_bull_ext")
-        bear_ext  = st.slider("Bear extension level",  0.1, 2.0, 0.5, 0.05, key="f_bear_ext")
-        bull_retr = st.slider("Bull retracement level", 0.1, 0.9, 0.5, 0.05, key="f_bull_retr")
-        bear_retr = st.slider("Bear retracement level", 0.1, 0.9, 0.5, 0.05, key="f_bear_retr")
+        bull_ext  = st.slider("Bull extension level",  0.1, 2.0, 0.5, 0.05, key="f_bull_ext",
+                              help="How far above the box (in box-widths) to measure "
+                                   "the up-move reach probability. 1.0 = one full "
+                                   "range past the high.")
+        bear_ext  = st.slider("Bear extension level",  0.1, 2.0, 0.5, 0.05, key="f_bear_ext",
+                              help="How far below the box (in box-widths) to measure "
+                                   "the down-move reach probability. 1.0 = one full "
+                                   "range past the low.")
+        bull_retr = st.slider("Bull retracement level", 0.1, 0.9, 0.5, 0.05, key="f_bull_retr",
+                              help="How deep a pull-back below the box high to measure "
+                                   "(in box-widths), after the high breaks. 0.5 = "
+                                   "halfway back down the box.")
+        bear_retr = st.slider("Bear retracement level", 0.1, 0.9, 0.5, 0.05, key="f_bear_retr",
+                              help="How deep a bounce above the box low to measure "
+                                   "(in box-widths), after the low breaks. 0.5 = "
+                                   "halfway back up the box.")
 
         if st.button("↺ Reset category filters", use_container_width=True):
             for k in ["f_dow", "f_gap", "f_kind", "f_first"]:

@@ -1,12 +1,12 @@
 # Sidebar tooltip audit — Sharp backtesting suite
 
-This lists every **sidebar** widget, per mode, that currently has **no `help=`
-tooltip**, with a suggested one-line plain-English tooltip for each. Widgets that
-already have a `help=` argument are noted as covered and are not repeated.
+This lists every **sidebar** widget, per mode, that previously had **no `help=`
+tooltip**, with the one-line plain-English tooltip suggested for each. Widgets that
+already had a `help=` argument are noted as covered and are not repeated.
 
-**No code was changed.** These are suggestions only — copy the `help=` text into
-the relevant widget call in `app.py`, `prob_app.py` or `advanced_mode.py` when you
-are ready.
+**STATUS: ✅ APPLIED.** Every suggested tooltip below has been copied into the
+relevant widget call in `app.py`, `prob_app.py` and `advanced_mode.py`. The tables
+are kept as the reference for what each tooltip says and where it lives.
 
 ---
 
