@@ -1,5 +1,5 @@
 streamlit>=1.47.0
-Authlib>=1.3.2   # st.login (Google OIDC sign-in)
+Authlib==1.5.2   # st.login (Google OIDC) — pinned: 1.6+/1.7+ break the callback silently
 httpx>=0.27      # required by Authlib's starlette client (st.login 500s without it)
 requests>=2.31   # Supabase PostgREST credit ledger
 pandas>=2.0.0
