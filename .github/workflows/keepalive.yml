@@ -1,0 +1,16 @@
+# Keeps the free Streamlit Cloud app awake during Indian + US market hours.
+# Public repo => unlimited free Actions minutes. Pings every 10 minutes
+# between 08:30 and 23:30 IST (03:00-18:00 UTC).
+name: keepalive
+on:
+  schedule:
+    - cron: "*/10 3-17 * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping app
+        run: |
+          curl -s -L -c /tmp/cj -b /tmp/cj -o /dev/null -w "app status %{http_code}\n" \
+            "https://sharpprobacktester.streamlit.app/" || true

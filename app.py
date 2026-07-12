@@ -36,7 +36,8 @@ import build_facts
 import data_store
 import live_feed
 import live_stats
-import report
+# NOTE: `report` (matplotlib + fpdf, ~100 MB) is imported lazily at the two
+# PDF call sites — keeps boot fast and memory low on the free cloud tier.
 from datetime import time as dtime
 
 st.set_page_config(page_title="Sharp · Backtest with precision", page_icon="#️⃣",
@@ -1187,6 +1188,7 @@ def daywise_mode():
         trades = daywise.run(prepped, configs, entry_cond, dir_filters, vwap_exit)
         with st.spinner("Building PDF report…"):
             try:
+                import report
                 pdf_bytes = report.build_daywise_pdf(
                     instrument, (d0, d1), open_t, close_t, configs, trades,
                     ib_min=ib_min, entry_cond=entry_cond)
@@ -1825,6 +1827,7 @@ def _live_render(instrument, feat, probs, open_t):
 
     # ── PDF session report ────────────────────────────────────────────────────
     try:
+        import report
         pdf_bytes = report.build_live_pdf(instrument, feat, probs, plan)
         st.download_button(
             "📄 Download PDF session report",
