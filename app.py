@@ -1213,12 +1213,20 @@ def daywise_mode():
     # ── per-weekday optimizer ─────────────────────────────────────────────────
     st.divider()
     with st.expander("🔬 Per-weekday optimizer — find the best config for one weekday"):
-        oc = st.columns(4)
+        oc = st.columns(5)
         opt_day = oc[0].selectbox("Weekday", daywise.WEEKDAYS, key="dw_opt_day")
         opt_metric = oc[1].selectbox("Rank by",
-                                     ["expectancy", "win_rate", "net", "pf"], key="dw_opt_metric")
+                                     ["expectancy", "win_rate", "net", "pf",
+                                      "green_months"], key="dw_opt_metric",
+                                     help="green_months = % of calendar months with "
+                                          "positive P&L — optimizes for month-on-month "
+                                          "consistency instead of raw totals.")
         opt_min = oc[2].number_input("Min trades", 20, 1000, 100, 10, key="dw_opt_min")
-        opt_dirs = oc[3].multiselect("Directions", ["long", "short"],
+        opt_green = oc[3].number_input("Min green months %", 0, 100, 0, 5,
+                                       key="dw_opt_green",
+                                       help="Filter: only keep configs profitable in at "
+                                            "least this % of their months.")
+        opt_dirs = oc[4].multiselect("Directions", ["long", "short"],
                                      default=["long", "short"], key="dw_opt_dirs")
         if st.button("🔎 Optimize this weekday", key="dw_opt_run",
                      help="Sweeps every entry/stop/target combo for this weekday. Costs 1 credit."):
@@ -1230,8 +1238,11 @@ def daywise_mode():
                         prepped[opt_day], opt_dirs, daywise.OPT_GRID,
                         opt_metric, int(opt_min), entry_cond=entry_cond,
                         dir_filters=dir_filters, vwap_exit=vwap_exit)
+                if not res.empty and int(opt_green) > 0:
+                    res = res[res["green mo %"] >= int(opt_green)].reset_index(drop=True)
                 if res.empty:
-                    st.warning("No configs met the minimum-trades threshold.")
+                    st.warning("No configs met the min-trades / min-green-months "
+                               "thresholds.")
                 else:
                     st.session_state["dw_opt_result"] = (opt_day, res)
 
@@ -1260,13 +1271,20 @@ def daywise_mode():
 
     # ── combined optimizer (all weekdays at once) ─────────────────────────────
     with st.expander("🧩 Combined optimizer — best config for EVERY weekday at once"):
-        oc2 = st.columns(3)
+        oc2 = st.columns(4)
         co_metric = oc2[0].selectbox("Rank by",
-                                     ["expectancy", "win_rate", "net", "pf"],
-                                     key="dw_co_metric")
+                                     ["expectancy", "win_rate", "net", "pf",
+                                      "green_months"],
+                                     key="dw_co_metric",
+                                     help="green_months = % of calendar months with "
+                                          "positive P&L (month-on-month consistency).")
         co_min = oc2[1].number_input("Min trades / weekday", 20, 1000, 100, 10,
                                      key="dw_co_min")
-        co_dirs = oc2[2].multiselect("Directions", ["long", "short"],
+        co_green = oc2[2].number_input("Min green months %", 0, 100, 0, 5,
+                                       key="dw_co_green",
+                                       help="Only configs profitable in at least this "
+                                            "% of their months are considered.")
+        co_dirs = oc2[3].multiselect("Directions", ["long", "short"],
                                      default=["long", "short"], key="dw_co_dirs")
         if st.button("🔎 Optimize all 5 weekdays (~1 min)", key="dw_co_run",
                      help="Runs the per-weekday sweep for every weekday at once. Costs 1 credit."):
@@ -1280,12 +1298,16 @@ def daywise_mode():
                         prepped[day], co_dirs, daywise.OPT_GRID,
                         co_metric, int(co_min), entry_cond=entry_cond,
                         dir_filters=dir_filters, vwap_exit=vwap_exit)
+                    if not res.empty and int(co_green) > 0:
+                        res = res[res["green mo %"] >= int(co_green)]
                     if not res.empty:
                         b = res.iloc[0]
                         rows.append({"Day": day, "direction": b["direction"],
                                      "entry": int(b["entry"]), "stop": int(b["stop"]),
                                      "tp1": int(b["tp1"]), "tp2": int(b["tp2"]),
                                      "trades": int(b["trades"]), "win %": b["win %"],
+                                     "green mo %": b["green mo %"],
+                                     "months": b["months"],
                                      "expectancy": b["expectancy"],
                                      "net": b["net"], "pf": b["pf"]})
                     prog.progress((i + 1) / len(daywise.WEEKDAYS),
@@ -1427,13 +1449,21 @@ def _dw_show_results(res):
 
     rr = (m["avg_win"] / abs(m["avg_loss"])) if m["avg_loss"] else float("inf")
     avg_r = trades["r_mult"].mean() if "r_mult" in trades.columns else float("nan")
-    k2 = st.columns(4)
+    gm_pct, gm_g, gm_n = daywise.green_months(trades["date"], trades["pnl"])
+    k2 = st.columns(5)
     k2[0].metric("Avg Win", f"{m['avg_win']:.1f} pts")
     k2[1].metric("Avg Loss", f"{m['avg_loss']:.1f} pts")
     k2[2].metric("Avg RR (win/loss)", f"{rr:.2f}" if np.isfinite(rr) else "∞",
                  help="Average winning trade ÷ average losing trade.")
     k2[3].metric("Avg R / trade", f"{avg_r:+.2f}R" if np.isfinite(avg_r) else "—",
                  help="Mean PnL per unit of initial risk (entry−stop distance).")
+    k2[4].metric("Green months", f"{gm_pct:.0f}% ({gm_g}/{gm_n})",
+                 help="Share of calendar months with net-positive P&L — the "
+                      "month-on-month consistency of this configuration.")
+
+    with st.expander(f"📅 Month-on-month P&L ({gm_g} green / {gm_n - gm_g} red)"):
+        st.dataframe(daywise.monthly_table(trades), use_container_width=True,
+                     hide_index=True)
 
     # equity curve
     t = trades.sort_values("date")
@@ -2724,16 +2754,25 @@ def ib50_mode():
                     "optionally, the **direction filters** themselves — so you can see "
                     "whether formation / close-location / VWAP / AND-OR actually earn "
                     "their keep.")
-        o = st.columns(4)
-        rank = o[0].selectbox("Rank by", ["net_r", "net", "win_rate", "pf", "expectancy"],
+        o = st.columns(5)
+        rank = o[0].selectbox("Rank by", ["net_r", "net", "win_rate", "pf", "expectancy",
+                                          "green_months"],
                               format_func=lambda x: {"net_r": "Net R", "net": "Net $",
                                                      "win_rate": "Win %", "pf": "Profit factor",
-                                                     "expectancy": "Expectancy"}[x],
-                              key="ib50_rank")
+                                                     "expectancy": "Expectancy",
+                                                     "green_months": "Green months %"}[x],
+                              key="ib50_rank",
+                              help="Green months % = share of calendar months the config "
+                                   "closed profitable — optimizes month-on-month "
+                                   "consistency instead of raw totals.")
         min_tr = int(o[1].number_input("Min trades", 10, 5000, 50, 10, key="ib50_min"))
-        eg = o[2].multiselect("Entry % grid", [0, 10, 25, 50, 75],
+        min_green_ib = int(o[2].number_input("Min green months %", 0, 100, 0, 5,
+                                             key="ib50_green",
+                                             help="Filter: only keep configs profitable "
+                                                  "in at least this % of their months."))
+        eg = o[3].multiselect("Entry % grid", [0, 10, 25, 50, 75],
                               default=[0, 10, 25, 50], key="ib50_eg")
-        tg = o[3].multiselect("Target % grid", [25, 50, 75, 100, 150, 200],
+        tg = o[4].multiselect("Target % grid", [25, 50, 75, 100, 150, 200],
                               default=[50, 75, 100, 150], key="ib50_tg")
         sg = st.multiselect("Stop % grid", [25, 50, 75, 100],
                             default=[50, 75, 100], key="ib50_sg")
@@ -2773,6 +2812,8 @@ def ib50_mode():
                 res = ib50.optimize(prep, cfg, grid, min_tr, rank,
                                     sweep_form=sw_form, sweep_close=sw_close,
                                     sweep_vwap=sw_vwap, sweep_logic=sw_logic, progress=cb)
+                if not res.empty and min_green_ib > 0:
+                    res = res[res["green mo %"] >= min_green_ib].reset_index(drop=True)
                 prog.empty()
                 st.session_state["ib50_opt_res"] = res
 
@@ -3103,11 +3144,19 @@ def main():
             k[4].metric("Profit Factor", f"{m['pf']:.2f}" if np.isfinite(m["pf"]) else "∞")
             k[5].metric("Trades", f"{m['trades']:,}")
 
-            k2 = st.columns(3)
+            k2 = st.columns(4)
             k2[0].metric("Avg Win", f"{m['avg_win']:.1f} pts")
             k2[1].metric("Avg Loss", f"{m['avg_loss']:.1f} pts")
             rr = (m["avg_win"] / abs(m["avg_loss"])) if m["avg_loss"] else 0
             k2[2].metric("Reward : Risk (realised)", f"{rr:.2f}")
+            _gm, _g, _n = daywise.green_months(dates, pnl)
+            k2[3].metric("Green months", f"{_gm:.0f}% ({_g}/{_n})",
+                         help="Share of calendar months with net-positive P&L.")
+
+            with st.expander(f"📅 Month-on-month P&L ({_g} green / {_n - _g} red)"):
+                _mt = daywise.monthly_table(
+                    pd.DataFrame({"date": pd.to_datetime(dates), "pnl": pnl}))
+                st.dataframe(_mt, use_container_width=True, hide_index=True)
 
             order = np.argsort(dates)
             fig = go.Figure()
@@ -3151,15 +3200,22 @@ def main():
     with tab2:
         st.markdown("Sweep permutations and rank by your chosen metric. "
                     "Each row is a fully-specified, tradeable rule.")
-        o = st.columns(4)
+        o = st.columns(5)
         sweep_logics = o[0].multiselect("Side logics", list(SIDE_LOGICS.keys()),
                                         default=list(SIDE_LOGICS.keys()))
         SORT_COLS = {"Expectancy": "expectancy", "Net P&L": "net",
-                     "Win rate": "win %", "Profit factor": "PF"}
-        sort_label  = o[1].selectbox("Rank by", list(SORT_COLS.keys()))
+                     "Win rate": "win %", "Profit factor": "PF",
+                     "Green months %": "green mo %"}
+        sort_label  = o[1].selectbox("Rank by", list(SORT_COLS.keys()),
+                                     help="Green months % ranks by month-on-month "
+                                          "consistency: the share of calendar months "
+                                          "the config closed profitable.")
         sort_metric = SORT_COLS[sort_label]
         min_trades = o[2].number_input("Min trades", 20, 2000, 100, 10)
-        sweep_dow  = o[3].checkbox("Also sweep each weekday", value=False)
+        min_green = o[3].number_input("Min green months %", 0, 100, 0, 5,
+                                      help="Filter: drop configs profitable in fewer "
+                                           "than this % of their months.")
+        sweep_dow  = o[4].checkbox("Also sweep each weekday", value=False)
 
         o2 = st.columns(3)
         sweep_gap   = o2[0].checkbox("Sweep gap type", value=True)
@@ -3183,6 +3239,7 @@ def main():
             prog = st.progress(0.0, text=f"Evaluating {len(combos):,} permutations…")
             # precompute pnl per (logic, t, s) to avoid recompute across filters
             cache = {}
+            month_id = (P["date"].dt.year * 12 + P["date"].dt.month).to_numpy()
             for i, (lg, t, s, d, gp, kd, fs) in enumerate(combos):
                 key = (lg, t, s)
                 if key not in cache:
@@ -3197,6 +3254,12 @@ def main():
                 m = metrics(pnl_all[mask])
                 if m is None:
                     continue
+                # month-on-month consistency (vectorized: monthly net > 0)
+                _, minv = np.unique(month_id[mask], return_inverse=True)
+                msums = np.bincount(minv, weights=pnl_all[mask])
+                gm_pct = (msums > 0).mean() * 100
+                if gm_pct < min_green:
+                    continue
                 results.append({
                     "side logic": inv[lg],
                     "target×": t, "stop×": s, "R:R": round(t / s, 2),
@@ -3205,6 +3268,8 @@ def main():
                     "first": fs or "any",
                     "trades": m["trades"],
                     "win %": round(m["win_rate"] * 100, 1),
+                    "green mo %": round(gm_pct, 1),
+                    "months": f"{int((msums > 0).sum())}/{len(msums)}",
                     "expectancy": round(m["expectancy"], 2),
                     "net": round(m["net"], 0),
                     "PF": round(m["pf"], 2) if np.isfinite(m["pf"]) else 99,

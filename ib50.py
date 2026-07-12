@@ -28,6 +28,8 @@ import itertools
 import numpy as np
 import pandas as pd
 
+import daywise                      # green_months (month-on-month consistency)
+
 import indicators as ind
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
@@ -407,6 +409,7 @@ def optimize(prepped: list, cfg: dict, grid: dict, min_trades: int, rank_by: str
         trades = run(prepped, c)
         if len(trades) >= min_trades:
             m = metrics(trades, n_days)
+            gm, g, n = daywise.green_months(trades["date"], trades["pnl"])
             rows.append({
                 "formation": "on" if f else "off",
                 "close-loc": "on" if cl else "off",
@@ -415,6 +418,8 @@ def optimize(prepped: list, cfg: dict, grid: dict, min_trades: int, rank_by: str
                 "entry %": e, "stop %": s, "target %": t,
                 "trades": m["trades"],
                 "win %": round(m["win_rate"] * 100, 1),
+                "green mo %": round(gm, 1),
+                "months": f"{g}/{n}",
                 "net R": round(m["net_r"], 1),
                 "net $": round(m["net_pnl"], 0),
                 "PF": round(m["profit_factor"], 2) if np.isfinite(m["profit_factor"]) else 99,
@@ -426,6 +431,11 @@ def optimize(prepped: list, cfg: dict, grid: dict, min_trades: int, rank_by: str
             progress(k + 1, len(combos))
     if not rows:
         return pd.DataFrame()
+    if rank_by == "green_months":
+        # month-on-month consistency first, net R as the tie-break
+        return (pd.DataFrame(rows)
+                .sort_values(["green mo %", "net R"], ascending=False)
+                .reset_index(drop=True))
     col = {"net_r": "net R", "net": "net $", "win_rate": "win %",
            "pf": "PF", "expectancy": "expectancy $"}[rank_by]
     return pd.DataFrame(rows).sort_values(col, ascending=False).reset_index(drop=True)

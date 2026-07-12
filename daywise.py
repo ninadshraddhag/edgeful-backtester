@@ -372,6 +372,38 @@ def _metric(arr, name):
     return arr.mean()
 
 
+def green_months(dates, pnl):
+    """
+    Month-on-month consistency: % of calendar months with net-positive P&L.
+    Returns (green_pct, green_count, total_months). Only months that actually
+    contain trades are counted.
+    """
+    pnl = np.asarray(pnl, dtype=float)
+    if len(pnl) == 0:
+        return 0.0, 0, 0
+    idx = pd.to_datetime(pd.Series(list(dates)))
+    msum = pd.Series(pnl).groupby((idx.dt.year * 12 + idx.dt.month).values).sum()
+    n = len(msum)
+    g = int((msum > 0).sum())
+    return (g / n * 100.0 if n else 0.0), g, n
+
+
+def monthly_table(trades: pd.DataFrame) -> pd.DataFrame:
+    """Per-month P&L breakdown for a trades frame with `date` and `pnl` columns."""
+    if trades.empty:
+        return pd.DataFrame()
+    t = trades.copy()
+    t["month"] = pd.to_datetime(t["date"]).dt.to_period("M").astype(str)
+    m = (t.groupby("month")
+         .agg(trades=("pnl", "size"), net=("pnl", "sum"),
+              win_rate=("win", "mean") if "win" in t.columns else ("pnl", lambda x: (x > 0).mean())))
+    m["net"] = m["net"].round(1)
+    m["win_rate"] = (m["win_rate"] * 100).round(1)
+    m["green"] = np.where(m["net"] > 0, "✅", "🔻")
+    m["cum"] = m["net"].cumsum().round(1)
+    return m.reset_index()
+
+
 def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None,
                      entry_cond="any", dir_filters=None, vwap_exit=False):
     """
@@ -389,7 +421,7 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
                         continue
                     for d in directions:
                         is_long = d == "long"
-                        pnls = []
+                        pnls, dts = [], []
                         for rec in day_list:
                             if not dir_allowed(rec, is_long, dir_filters):
                                 continue
@@ -397,14 +429,18 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
                                             cutoff, entry_cond, vwap_exit)
                             if res is not None:
                                 pnls.append(res[0])
+                                dts.append(rec["date"])
                         if len(pnls) < min_trades:
                             continue
                         arr = np.array(pnls)
+                        gm, g, n = green_months(dts, arr)
                         rows.append({
                             "direction": d, "entry": entry, "stop": stop,
                             "tp1": tp1, "tp2": tp2,
                             "trades": len(arr),
                             "win %": round((arr > 0).mean() * 100, 1),
+                            "green mo %": round(gm, 1),
+                            "months": f"{g}/{n}",
                             "expectancy": round(arr.mean(), 2),
                             "net": round(arr.sum(), 0),
                             "pf": round(_metric(arr, "pf"), 2) if np.isfinite(_metric(arr, "pf")) else 99,
@@ -412,5 +448,9 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
     if not rows:
         return pd.DataFrame()
     res = pd.DataFrame(rows)
+    if metric == "green_months":
+        # consistency first, expectancy as tie-break
+        return (res.sort_values(["green mo %", "expectancy"], ascending=False)
+                .reset_index(drop=True))
     col = {"win_rate": "win %", "expectancy": "expectancy", "net": "net", "pf": "pf"}[metric]
     return res.sort_values(col, ascending=False).reset_index(drop=True)
