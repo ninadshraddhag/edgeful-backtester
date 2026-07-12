@@ -12,3 +12,4 @@ analysis/confluence_presets.json
 data/instruments.json
 analysis/ib50_confluence.json
 analysis/credits_local.json
+secrets.toml

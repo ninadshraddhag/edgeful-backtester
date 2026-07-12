@@ -1,0 +1,27 @@
+# Production stack: Sharp app + Caddy (automatic HTTPS).
+# Server setup lives in DEPLOY_AWS.md. Secrets: put the TOML into
+# ./secrets.toml on the server (NEVER commit it).
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8501"
+    volumes:
+      - ./secrets.toml:/app/.streamlit/secrets.toml:ro
+    mem_limit: 1600m
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,5 @@
+# Replace with your real domain before `docker compose up`.
+# Caddy fetches + renews Let's Encrypt TLS automatically; websockets just work.
+sharpbacktester.com, www.sharpbacktester.com {
+	reverse_proxy app:8501
+}
