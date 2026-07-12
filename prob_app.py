@@ -46,7 +46,7 @@ def load_facts(mtime):           # mtime arg busts the cache when facts.csv chan
     return df
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, max_entries=2)
 def load_facts_custom(ib_min, _mtimes):
     """Recompute the facts table live for a non-default IB duration (cached)."""
     import build_facts
@@ -64,7 +64,7 @@ def load_facts_custom(ib_min, _mtimes):
     return df
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, max_entries=6)
 def load_facts_session(inst, session, ib_min, mtime):
     """Facts table for one NAMED session of a 24-h instrument (cached).
     Gap/PDH/PDL chain session-vs-same-session (London vs London, Asia vs Asia)."""
@@ -76,7 +76,7 @@ def load_facts_session(inst, session, ib_min, mtime):
     return out
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=1)
 def _minute_and_open(inst, mtime):
     """Cleaned minute frame + auto-detected open for the day-browser charts."""
     path = data_store.discover()[inst]

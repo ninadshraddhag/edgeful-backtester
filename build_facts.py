@@ -148,7 +148,13 @@ def _pd_breaks(g, pdh, pdl):
 
 
 def clean_min(df):
-    """Normalise an OHLC minute DataFrame: lowercase cols, parse date, add t_min."""
+    """Normalise an OHLC minute DataFrame: lowercase cols, parse date, add t_min.
+
+    Memory diet (Streamlit Cloud has ~1 GB): floats stored as float32 (halves
+    the numeric footprint; plenty of precision for prices) and date_only holds
+    SHARED per-day date objects instead of one Python object per row (saves
+    >100 MB on the 3.8M-row XAUUSD frame).
+    """
     df = df.copy()
     df.columns = df.columns.str.strip().str.lower()
     if "date" not in df.columns:
@@ -161,8 +167,13 @@ def clean_min(df):
     df = df.dropna(subset=["open", "high", "low", "close"])
     df = df[(df["high"] >= df["low"]) & (df["open"] > 0)]
     df = df.sort_values("date").reset_index(drop=True)
-    df["date_only"] = df["date"].dt.date
-    df["t_min"] = df["date"].dt.hour * 60 + df["date"].dt.minute
+    for c in df.columns:
+        if c != "date" and pd.api.types.is_float_dtype(df[c]):
+            df[c] = df[c].astype("float32")
+    dd = df["date"].dt.date
+    canon = {v: v for v in pd.unique(dd)}      # one shared object per day
+    df["date_only"] = dd.map(canon)
+    df["t_min"] = (df["date"].dt.hour * 60 + df["date"].dt.minute).astype("int16")
     return df
 
 

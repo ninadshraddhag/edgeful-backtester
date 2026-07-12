@@ -65,7 +65,7 @@ SIDE_LOGICS = {
 
 # ─── data loaders ─────────────────────────────────────────────────────────────
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def load_min(path, mtime):
     return build_facts.clean_min(data_store.read_minute(path))
 
@@ -114,7 +114,7 @@ def get_facts(instrument, mpath, mtime, open_t, close_t, ib_min=60):
 
 # ─── first-passage cache (the engine) ─────────────────────────────────────────
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, max_entries=4)
 def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
     """
     Per-day first-passage table: for a long-on-high-break and a short-on-low-break,
@@ -901,7 +901,7 @@ def _filter_prepped(prepped, d0, d1):
 
 # ─── day-wise IB retracement mode ─────────────────────────────────────────────
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=1)
 def prep_daywise(instrument, mpath, mtime, open_t, close_t, ib_min=60):
     return daywise.prep_days(load_min(mpath, mtime), open_t, close_t, ib_min)
 
@@ -1838,12 +1838,12 @@ def _live_render(instrument, feat, probs, open_t):
 
 # ═══════════════════════ IB50 — IB Retracement strategy (Pine port) ═══════════
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=1)
 def prep_ib50(instrument, mpath, mtime, open_t, close_t, ib_min):
     return ib50.prep_days(load_min(mpath, mtime), open_t, close_t, ib_min)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=8)
 def _ib50_run_cached(instrument, mpath, mtime, cfg_json, d0, d1):
     """Cached GROSS run of one config over [d0,d1]. Confluence reruns on every
     widget click (calendar, cost inputs, browser) — caching this means the heavy
