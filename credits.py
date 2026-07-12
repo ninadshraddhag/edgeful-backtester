@@ -24,6 +24,7 @@ LOCAL_STORE = os.path.join(HERE, "analysis", "credits_local.json")
 _LOCK = threading.Lock()
 
 ADMIN_EMAILS = {"ninadshraddhag@gmail.com"}
+SUPPORT_EMAIL = "sharpbacktester@gmail.com"   # public help/credits contact
 STARTER_CREDITS = 20          # granted automatically on first login
 ACTION_COSTS = {              # credits per metered action (default 1)
     "daywise_run": 1,
@@ -227,7 +228,7 @@ def try_charge(action: str) -> bool:
     ok, bal = charge(email, action, n)
     if not ok:
         st.error(f"⛔ You're out of credits (this run costs {n}). "
-                 "Contact the admin to top up your balance.")
+                 f"Email **{SUPPORT_EMAIL}** to top up your balance.")
         return False
     st.session_state["credit_balance"] = bal
     if not is_admin(email):

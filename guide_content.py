@@ -471,7 +471,7 @@ WELCOME_TOUR = [
             "optimizers.\n\n"
             "**Browsing the Probabilities mode is completely free** — explore the odds "
             "as much as you like without spending a credit.\n\n"
-            "Run low? **Contact the admin to top up your credits.**",
+            "Run low? **Email sharpbacktester@gmail.com to top up your credits.**",
     },
     {
         "title": "Where to start",

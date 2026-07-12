@@ -1,0 +1,15 @@
+# Render.com Blueprint — escape hatch / upgrade path from Streamlit Community
+# Cloud. See RENDER_MIGRATION.md for the 10-minute setup. Free tier works
+# (sleeps when idle); Starter ($7/mo) keeps it always-on.
+services:
+  - type: web
+    name: sharp-backtester
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+    # Secrets are provided as a Secret File in the Render dashboard:
+    #   path: .streamlit/secrets.toml   (same TOML content as Streamlit Cloud)

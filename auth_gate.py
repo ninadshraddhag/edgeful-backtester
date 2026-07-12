@@ -63,7 +63,7 @@ def require_login(brand_html: str | None = None) -> tuple[str, bool]:
                 st.login()
         st.caption("We only receive your Google email address — no password, "
                    "no other data. Educational & research tool; not investment "
-                   "advice.")
+                   "advice.  ·  Help: sharpbacktester@gmail.com")
         st.stop()
 
     email = (getattr(st.user, "email", "") or "").strip().lower()

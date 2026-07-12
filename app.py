@@ -2990,6 +2990,7 @@ def main():
             + (" · <span style='color:#FFB74D'>DEV MODE — auth off</span>" if dev_mode else "")
             + "</div>", unsafe_allow_html=True)
         auth_gate.logout_button()
+        st.caption("✉ help & credits: sharpbacktester@gmail.com")
         st.divider()
 
     if not os.path.exists(FACTS):
