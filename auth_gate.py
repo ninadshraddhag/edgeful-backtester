@@ -1,83 +1,97 @@
 """
-auth_gate.py — Google-only sign-in gate for the public platform.
+auth_gate.py — simple sign-up gate: name + email. No passwords, no OAuth.
 
-Uses Streamlit's native OIDC auth (st.login / st.user, Streamlit >= 1.42) with
-Google as the sole provider. Configuration lives in secrets ([auth] block —
-see SETUP_PUBLIC.md). When no [auth] secrets exist (local dev), the gate
-degrades to DEV MODE: no login screen, the admin email is assumed.
+The earlier Google-OIDC (st.login) flow proved fragile on Streamlit Cloud and
+was removed. Visitors sign up / return with just their name + email; accounts
+and credits stay keyed by email in credits.py, so nothing else changed.
+
+Admin access is protected by a PIN (st.secrets["app"]["admin_pin"]) — with an
+honor-system form, typing the admin's email must NOT grant the admin panel.
+
+DEV MODE: running locally (not on Streamlit Cloud) skips the gate entirely
+and assumes the admin identity, exactly as before.
 """
 import os
+import re
 import sys
 
 import streamlit as st
 
+import credits
+
 DEV_EMAIL = "ninadshraddhag@gmail.com"
 
-# Streamlit Community Cloud runs the repo from /mount/src on Linux. The owner's
-# dev machine is Windows — so "no auth secrets" means DEV MODE locally, but on
-# the cloud it means the platform hasn't been activated yet and must NOT fall
-# through to an open, everyone-is-admin app.
+# Streamlit Community Cloud runs the repo from /mount/src on Linux; the owner's
+# dev machine is Windows.
 IS_CLOUD = os.path.exists("/mount/src") or (not sys.platform.startswith("win"))
 
+_EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+(\.[\w-]+)+$")
 
-def auth_configured() -> bool:
+
+def _admin_pin():
     try:
-        return "auth" in st.secrets and bool(st.secrets["auth"].get("client_id"))
+        return str(st.secrets["app"]["admin_pin"]) or None
     except Exception:
-        return False
+        return None
 
 
 def require_login(brand_html: str | None = None) -> tuple[str, bool]:
     """
-    Gate the whole app behind Google sign-in.
-    Returns (email, dev_mode). Renders the landing page and halts when the
-    visitor is not signed in.
+    Gate the app behind the sign-up form. Returns (email, dev_mode).
+    Renders the sign-up page and halts when the visitor hasn't signed up yet.
     """
-    if not auth_configured():
-        if IS_CLOUD:
-            if brand_html:
-                st.markdown(brand_html, unsafe_allow_html=True)
-            st.warning("🔒 **Sign-in is being set up.** The platform opens to "
-                       "the public as soon as Google login is activated — "
-                       "check back shortly.")
-            st.caption("Owner: complete SETUP_PUBLIC.md (Google OAuth client + "
-                       "Supabase + Streamlit secrets), then reboot the app.")
-            st.stop()
+    if not IS_CLOUD:                                   # local dev — no gate
         st.session_state["user_email"] = DEV_EMAIL
+        st.session_state.setdefault("user_name", "Ninad (dev)")
+        st.session_state["admin_ok"] = True
         return DEV_EMAIL, True
 
-    if not getattr(st.user, "is_logged_in", False):
-        if brand_html:
-            st.markdown(brand_html, unsafe_allow_html=True)
-        st.markdown("### Probability-driven intraday backtesting")
-        st.markdown(
-            "10 years of minute data · NIFTY 50 · BANK NIFTY · NQ · XAUUSD  \n"
-            "Explore ORB/IB probabilities, backtest day-wise strategies, and "
-            "browse every historical setup — free to sign in, backtest runs "
-            "are metered by credits.")
-        st.divider()
-        c = st.columns([1, 2])
-        with c[0]:
-            if st.button("🔐 Sign in with Google", type="primary",
-                         use_container_width=True):
-                st.login()
-        st.caption("We only receive your Google email address — no password, "
-                   "no other data. Educational & research tool; not investment "
-                   "advice.  ·  Help: sharpbacktester@gmail.com")
-        st.stop()
+    if st.session_state.get("user_email"):
+        return st.session_state["user_email"], False
 
-    email = (getattr(st.user, "email", "") or "").strip().lower()
-    if not email:
-        st.error("Google sign-in did not return an email address. Please sign "
-                 "out and try again.")
-        if st.button("Sign out"):
-            st.logout()
-        st.stop()
-    st.session_state["user_email"] = email
-    return email, False
+    # ── sign-up / sign-in page ────────────────────────────────────────────────
+    if brand_html:
+        st.markdown(brand_html, unsafe_allow_html=True)
+    st.markdown("### Probability-driven intraday backtesting")
+    st.markdown(
+        "10 years of minute data · NIFTY 50 · BANK NIFTY · NQ · XAUUSD  \n"
+        "Explore ORB/IB probabilities, backtest day-wise strategies, and browse "
+        "every historical setup. **Free to join** — backtest runs are metered "
+        "by credits (20 free on sign-up).")
+    st.divider()
+
+    with st.form("sharp_signup"):
+        c = st.columns(2)
+        name = c[0].text_input("Your name", placeholder="e.g. Rahul Sharma")
+        email = c[1].text_input("Email ID", placeholder="you@example.com")
+        code = st.text_input("Access code (optional — for admins only)",
+                             type="password",
+                             help="Regular users leave this blank.")
+        ok = st.form_submit_button("🚀 Start backtesting", type="primary",
+                                   use_container_width=True)
+    st.caption("By continuing you accept: this is an educational & research "
+               "tool only — not investment advice. Past performance does not "
+               "guarantee future results.  ·  Help: sharpbacktester@gmail.com")
+
+    if ok:
+        email_c = email.strip().lower()
+        if not name.strip():
+            st.error("Please enter your name.")
+        elif not _EMAIL_RE.match(email_c):
+            st.error("Please enter a valid email ID.")
+        else:
+            st.session_state["user_email"] = email_c
+            st.session_state["user_name"] = name.strip()
+            pin = _admin_pin()
+            st.session_state["admin_ok"] = bool(pin) and code.strip() == pin
+            credits.signup(email_c, name.strip())
+            st.rerun()
+    st.stop()
 
 
 def logout_button():
-    if auth_configured():
-        if st.button("🚪 Sign out", use_container_width=True):
-            st.logout()
+    if st.button("🚪 Sign out", use_container_width=True):
+        for k in ("user_email", "user_name", "admin_ok", "credit_balance",
+                  "_tour_done"):
+            st.session_state.pop(k, None)
+        st.rerun()

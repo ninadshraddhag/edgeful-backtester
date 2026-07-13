@@ -122,9 +122,57 @@ def balance(email: str) -> int:
 
 
 def is_admin(email: str) -> bool:
-    if email.strip().lower() in ADMIN_EMAILS:
-        return True
-    return bool(ensure_user(email).get("is_admin"))
+    """
+    Admin = flagged email AND the admin PIN entered this session. With the
+    honor-system sign-up form, merely typing the admin's email must not grant
+    the panel or unlimited runs.
+    """
+    flagged = (email.strip().lower() in ADMIN_EMAILS
+               or bool(ensure_user(email).get("is_admin")))
+    if not flagged:
+        return False
+    try:
+        return bool(st.session_state.get("admin_ok"))
+    except Exception:
+        return True          # non-Streamlit contexts (scripts, tests)
+
+
+def signup(email: str, name: str) -> dict:
+    """First-touch registration from the sign-up form: provision the account,
+    store the name (best-effort), and log the signup so the admin sees every
+    new user in the panel."""
+    email = email.strip().lower()
+    existed = False
+    sb = _sb()
+    if sb:
+        url, key = sb
+        r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
+                         params={"email": f"eq.{email}", "select": "email"},
+                         timeout=10)
+        existed = bool(r.ok and r.json())
+    else:
+        existed = email in _local_load()["users"]
+    user = ensure_user(email)
+    try:
+        set_flag(email, "name", name)      # ignored if the column doesn't exist
+    except Exception:
+        pass
+    if not existed:
+        if sb:
+            url, key = sb
+            try:
+                requests.post(f"{url}/rest/v1/usage_log", headers=_hdrs(key),
+                              json={"email": email, "action": f"signup:{name}",
+                                    "credits": 0}, timeout=10)
+            except Exception:
+                pass
+        else:
+            with _LOCK:
+                d = _local_load()
+                d["log"].append({"email": email, "action": f"signup:{name}",
+                                 "credits": 0, "ts": _now()})
+                _local_save(d)
+    return user
 
 
 def charge(email: str, action: str, n: int | None = None) -> tuple[bool, int]:

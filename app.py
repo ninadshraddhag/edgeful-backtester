@@ -3028,9 +3028,11 @@ def main():
         else:
             bal = st.session_state.get("credit_balance", user.get("credits", 0))
             who = f"💳 <b style='color:#ECEDEF'>{bal}</b> credits (1 per backtest run)"
+        _uname = st.session_state.get("user_name", "")
         st.markdown(
             f"<div style='font-size:0.85em;color:#9aa2b1;line-height:1.5'>"
-            f"Signed in: <b style='color:#ECEDEF'>{email}</b><br>{who}"
+            f"👤 <b style='color:#ECEDEF'>{_uname}</b><br>"
+            f"<span style='font-size:0.92em'>{email}</span><br>{who}"
             + (" · <span style='color:#FFB74D'>DEV MODE — auth off</span>" if dev_mode else "")
             + "</div>", unsafe_allow_html=True)
         auth_gate.logout_button()
