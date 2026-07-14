@@ -276,6 +276,21 @@ def filter_days(days, d0, d1):
     return [r for r in days if lo <= r["date"] <= hi]
 
 
+def _month_streaks(dates, pnl):
+    """(max consecutive GREEN months, max consecutive RED months)."""
+    idx = pd.to_datetime(pd.Series(list(dates)))
+    msum = pd.Series(np.asarray(pnl, float)).groupby(
+        (idx.dt.year * 12 + idx.dt.month).values).sum().sort_index()
+    best_g = best_r = cur_g = cur_r = 0
+    for v in msum.values:
+        if v > 0:
+            cur_g += 1; cur_r = 0
+        else:
+            cur_r += 1; cur_g = 0
+        best_g = max(best_g, cur_g); best_r = max(best_r, cur_r)
+    return best_g, best_r
+
+
 def metrics(trades: pd.DataFrame) -> dict:
     """Portfolio-style metrics on a trades frame (needs date + pnl)."""
     import daywise
@@ -289,10 +304,12 @@ def metrics(trades: pd.DataFrame) -> dict:
     dd = (cum - cum.cummax()).min()
     sharpe = (daily.mean() / daily.std() * np.sqrt(252)) if daily.std() > 0 else 0.0
     gmp, gmg, gmn = daywise.green_months(trades["date"], p)
+    max_g, max_r = _month_streaks(trades["date"], p)
     return {"n": int(len(p)), "exp": p.mean(), "win": (p > 0).mean() * 100,
             "pf": (gp / gl) if gl > 0 else np.inf, "net": p.sum(),
             "max_dd": float(dd), "sharpe": float(sharpe),
             "green_pct": gmp, "green": f"{gmg}/{gmn}", "months": gmn,
+            "max_green_streak": max_g, "max_red_streak": max_r,
             "avg_month": (cum.iloc[-1] / gmn) if gmn else 0.0}
 
 
@@ -329,20 +346,31 @@ OPT_GRIDS = {
 }
 
 
+DELTA_SWEEP = [0.2, 0.3, 0.4, 0.5, 0.65, 0.8]     # for the SELL variant
+
+
 def optimize_leg(days, base_cfg, leg, rank="exp", min_trades=100,
-                 min_green=0, progress=None):
+                 min_green=0, sweep_delta=False, progress=None):
     """
     Sweep the leg's parameter grid; one row per config with full metrics.
     rank ∈ {exp, pf, green_months, sharpe, net}. Non-cliff check is visual
     (all rows shown). Uses the current buy/sell variant + cost settings.
+
+    sweep_delta (SELL variant only): also sweeps the sold option's |delta| over
+    DELTA_SWEEP, so you can find whether a lower (OTM) delta turns premium-
+    selling profitable on trend legs.
     """
     import copy, itertools
     grid = OPT_GRIDS[leg]
     keys = list(grid)
-    combos = list(itertools.product(*[grid[k] for k in keys]))
+    deltas = (DELTA_SWEEP if (sweep_delta and base_cfg["variant"] == "sell")
+              else [base_cfg["sell_delta"]])
+    combos = [(v, dlt) for v in itertools.product(*[grid[k] for k in keys])
+              for dlt in deltas]
     rows = []
-    for i, vals in enumerate(combos):
+    for i, (vals, dlt) in enumerate(combos):
         cfg = copy.deepcopy(base_cfg)
+        cfg["sell_delta"] = dlt
         for k, v in zip(keys, vals):
             cfg[leg][k] = v
         if leg == "GF" and cfg["GF"]["gap_min"] >= cfg["GF"]["gap_max"]:
@@ -354,10 +382,13 @@ def optimize_leg(days, base_cfg, leg, rank="exp", min_trades=100,
             m = metrics(t)
             if m["green_pct"] >= min_green:
                 row = {k: vals[j] for j, k in enumerate(keys)}
+                if len(deltas) > 1:
+                    row["sell_Δ"] = dlt
                 row.update(trades=m["n"], exp=round(m["exp"], 0),
                            win_pct=round(m["win"], 1),
                            pf=round(m["pf"], 2) if np.isfinite(m["pf"]) else 99,
                            green_pct=round(m["green_pct"], 1), months=m["green"],
+                           red_streak=m["max_red_streak"],
                            sharpe=round(m["sharpe"], 2), net=round(m["net"], 0),
                            max_dd=round(m["max_dd"], 0))
                 rows.append(row)

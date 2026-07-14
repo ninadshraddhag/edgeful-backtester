@@ -53,14 +53,17 @@ def _cfg_from_state() -> dict:
 
 def _metric_cards(m, label):
     st.markdown(f"**{label}**")
-    c = st.columns(7)
+    c = st.columns(8)
     c[0].metric("Trades", f"{m['n']:,}")
     c[1].metric("Expectancy", f"₹{m['exp']:,.0f}")
     c[2].metric("Win %", f"{m['win']:.1f}%")
     c[3].metric("Profit factor", f"{m['pf']:.2f}" if np.isfinite(m["pf"]) else "∞")
     c[4].metric("Green months", f"{m['green_pct']:.0f}%", help=f"{m['green']} months green")
-    c[5].metric("Daily Sharpe", f"{m['sharpe']:.2f}")
-    c[6].metric("Max DD", f"₹{m['max_dd']:,.0f}")
+    c[5].metric("Max red streak", f"{m['max_red_streak']} mo",
+                help="Longest run of consecutive losing months — the worst "
+                     "drought you'd have had to sit through.")
+    c[6].metric("Daily Sharpe", f"{m['sharpe']:.2f}")
+    c[7].metric("Max DD", f"₹{m['max_dd']:,.0f}")
 
 
 def _monthly_heatmap(trades, title):
@@ -279,23 +282,33 @@ def render():
     # ── per-leg optimizer ──────────────────────────────────────────────────────
     st.divider()
     with st.expander("🔬 Per-leg optimizer — sweep one leg's parameters"):
-        oc = st.columns(5)
+        is_sell = st.session_state.get("opt_variant", "").startswith("Sell")
+        oc = st.columns(6 if is_sell else 5)
         oleg = oc[0].selectbox("Leg", ostr.LEGS, format_func=lambda l: LEG_NAMES[l],
                                key="opt_opt_leg")
         orank = oc[1].selectbox("Rank by", ["exp", "pf", "green_months", "sharpe", "net"],
                                 key="opt_opt_rank")
         omin = oc[2].number_input("Min trades", 20, 3000, 100, 10, key="opt_opt_min")
         ogreen = oc[3].number_input("Min green months %", 0, 100, 0, 5, key="opt_opt_green")
+        sweep_delta = False
+        if is_sell:
+            sweep_delta = oc[4].toggle("Sweep sell Δ", key="opt_opt_swd",
+                                       help="Also sweep the sold option's delta over "
+                                            "0.2–0.8 to find whether a lower (OTM) delta "
+                                            "makes premium-selling profitable.")
+        run_col = oc[5] if is_sell else oc[4]
         st.caption(f"Sweeps {LEG_NAMES[oleg]} over {oleg}'s grid on the selected period "
                    f"({split_name if res else st.session_state['opt_split']}), using the "
-                   "current Buy/Sell + cost settings.")
-        if oc[4].button("🔎 Optimize", key="opt_opt_run"):
+                   "current Buy/Sell + cost settings."
+                   + (" · **Sell Δ swept 0.2→0.8**" if sweep_delta else ""))
+        if run_col.button("🔎 Optimize", key="opt_opt_run"):
             import credits
             if credits.try_charge("ib50_optimizer"):
                 cfg = _cfg_from_state()
                 prog = st.progress(0.0, text="Sweeping…")
                 rdf = ostr.optimize_leg(days, cfg, oleg, rank=orank,
                                         min_trades=int(omin), min_green=int(ogreen),
+                                        sweep_delta=sweep_delta,
                                         progress=lambda k, n: prog.progress(k / n,
                                                  text=f"{k}/{n} configs…"))
                 prog.empty()
