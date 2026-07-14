@@ -12,6 +12,7 @@ import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 import build_facts
@@ -86,19 +87,35 @@ def _monthly_heatmap(trades, title):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _equity(port, legs):
-    fig = go.Figure()
-    colors = {"T1": "#42A5F5", "GF": "#FFB74D", "ORB": "#AB47BC", "ALL": "#25F08A"}
-    for leg in legs + (["ALL"] if len(legs) > 1 else []):
-        t = port.get(leg)
-        if t is None or t.empty:
-            continue
-        d = t.groupby(pd.to_datetime(t["date"]).dt.normalize())["pnl"].sum().cumsum()
-        fig.add_scatter(x=d.index, y=d.values, mode="lines", name=leg,
-                        line=dict(color=colors.get(leg), width=2.4 if leg == "ALL" else 1.4))
-    fig.update_layout(title="Equity curve (₹, 1 lot/leg)", height=360, template="plotly_dark",
+def _equity(port):
+    """Single combined portfolio equity curve with a drawdown panel below."""
+    t = port.get("ALL")
+    if t is None or t.empty:
+        return
+    daily = t.groupby(pd.to_datetime(t["date"]).dt.normalize())["pnl"].sum()
+    cum = daily.cumsum()
+    dd = cum - cum.cummax()
+    trough = dd.idxmin()
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
+                        vertical_spacing=0.05,
+                        subplot_titles=("Portfolio equity (₹, 1 lot/leg)", "Drawdown (₹)"))
+    fig.add_scatter(x=cum.index, y=cum.values, mode="lines", name="equity",
+                    line=dict(color="#25F08A", width=2),
+                    fill="tozeroy", fillcolor="rgba(37,240,138,0.07)", row=1, col=1)
+    fig.add_scatter(x=dd.index, y=dd.values, mode="lines", name="drawdown",
+                    line=dict(color="#F23645", width=1),
+                    fill="tozeroy", fillcolor="rgba(242,54,69,0.20)", row=2, col=1)
+    fig.add_scatter(x=[trough], y=[dd.min()], mode="markers",
+                    marker=dict(color="#F23645", size=8), row=2, col=1,
+                    hovertemplate=f"max DD ₹{dd.min():,.0f}<extra></extra>")
+    fig.update_layout(height=440, template="plotly_dark", showlegend=False,
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      legend=dict(orientation="h", y=1.12))
+                      margin=dict(t=42, b=10))
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)", zeroline=False)
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.05)")
+    for a in fig.layout.annotations:
+        a.font.size = 13
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -247,7 +264,7 @@ def render():
                 st.metric(LEG_NAMES[leg], f"₹{m['exp']:,.0f}/tr",
                           f"PF {m['pf']:.2f} · {m['green_pct']:.0f}% green · n={m['n']}")
 
-        _equity(port, legs)
+        _equity(port)
         _monthly_heatmap(port["ALL"], "Portfolio")
 
         dc, mc = ostr.correlations(port)
