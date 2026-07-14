@@ -3054,8 +3054,8 @@ def main():
         st.rerun()
 
     modes = ["Edge Backtester", "Day-wise IB Retracement", "IB50",
-             "Advanced Backtesting", "Probabilities", "Live Market Statistics",
-             "📖 Guide & Glossary"]
+             "Advanced Backtesting", "NIFTY Option Strategy", "Probabilities",
+             "Live Market Statistics", "📖 Guide & Glossary"]
     if credits.is_admin(email):
         modes.append("👑 Admin")
     mode = st.sidebar.radio("Mode", modes, key="app_mode")
@@ -3078,6 +3078,10 @@ def main():
         import advanced_mode
         onboarding.mode_guide("Advanced Backtesting")
         advanced_mode.render()
+        return
+    if mode == "NIFTY Option Strategy":
+        import option_mode
+        option_mode.render()
         return
 
     st.markdown(SHARP_HEADER, unsafe_allow_html=True)
