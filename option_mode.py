@@ -1,9 +1,9 @@
 """
 option_mode.py — "🎯 NIFTY Option Strategy" mode UI.
 
-Three legs (T1 Trend-Ride, GF Gap-Fade, ORB), a global BUY-ATM / SELL-0.8Δ
-variant toggle, per-leg optimizer, trade browser (spot chart + premium curve),
-and a portfolio view (equity, correlation, monthly heatmap, green months).
+Three legs (T1 Trend-Ride, GF Gap-Fade, ORB), each long the ATM option,
+per-leg optimizer, trade browser (spot chart + premium curve), and a portfolio
+view (equity, correlation, monthly heatmap, green months / red streak).
 Reuses option_strategy (engine) + options_pricing. Local-first mode.
 """
 import copy
@@ -34,8 +34,6 @@ def _cfg_from_state() -> dict:
     cfg = copy.deepcopy(ostr.DEFAULTS)
     cfg["iv"] = s["opt_iv"] / 100.0
     cfg["lots"] = int(s["opt_lots"])
-    cfg["variant"] = "sell" if s["opt_variant"].startswith("Sell") else "buy"
-    cfg["sell_delta"] = s["opt_selldelta"]
     cfg["slippage_pts"] = s["opt_slip"]
     cfg["cost_mult"] = 1.5 if s["opt_stress_cost"] else 1.0
     cfg["slip_mult"] = 2.0 if s["opt_stress_slip"] else 1.0
@@ -155,10 +153,10 @@ def _trade_browser(days, port, cfg):
 
 def render():
     st.title("🎯 NIFTY Option Strategy")
-    st.caption("Three diversified intraday legs on synthetic ATM options · "
-               "long-ATM (buy) or short-0.8Δ (sell) · 1 lot · flat 15:15 · "
-               "stops in % of PDC. Synthetic Black-Scholes premiums (flat IV) — "
-               "not live option data; numbers are a faithful model, not a promise.")
+    st.caption("Three diversified intraday legs · long the ATM option · 1 lot · "
+               "flat 15:15 · stops in % of PDC. Synthetic Black-Scholes premiums "
+               "(flat IV) — not live option data; numbers are a faithful model, "
+               "not a promise.")
 
     # ── sidebar ────────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -168,15 +166,8 @@ def render():
         mpath = data_store.discover()[instrument]
         mtime = os.path.getmtime(mpath)
 
-        st.session_state.setdefault("opt_variant", "Buy ATM (0.5Δ)")
-        st.radio("Position style", ["Buy ATM (0.5Δ)", "Sell 0.8Δ (opposite)"],
-                 key="opt_variant",
-                 help="Buy = long the ATM option in the trade direction (long gamma). "
-                      "Sell = short a 0.8-delta OPPOSITE option (bullish→short PUT), "
-                      "collecting premium (short gamma, +theta).")
+        st.caption("Long the ATM option in the trade direction (1 lot).")
         st.slider("Flat IV %", 6.0, 30.0, 13.0, 0.5, key="opt_iv")
-        st.number_input("Sell delta", 0.2, 0.9, 0.8, 0.05, key="opt_selldelta",
-                        help="Target |delta| of the option sold in the Sell variant.")
         st.number_input("Lots / leg", 1, 50, 1, key="opt_lots")
 
         with st.expander("💸 Costs & stress"):
@@ -245,9 +236,8 @@ def render():
         if not legs:
             st.warning("No trades — check leg toggles and gap/EMA gates.")
             return
-        variant_lbl = "SELL 0.8Δ" if cfg["variant"] == "sell" else "BUY ATM"
         st.divider()
-        st.subheader(f"{instrument} · {split_name} · {variant_lbl} · {len(legs)} leg(s)")
+        st.subheader(f"{instrument} · {split_name} · long ATM · {len(legs)} leg(s)")
 
         _metric_cards(ostr.metrics(port["ALL"]), "🎯 Portfolio (all enabled legs)")
         cols = st.columns(len(legs))
@@ -282,33 +272,23 @@ def render():
     # ── per-leg optimizer ──────────────────────────────────────────────────────
     st.divider()
     with st.expander("🔬 Per-leg optimizer — sweep one leg's parameters"):
-        is_sell = st.session_state.get("opt_variant", "").startswith("Sell")
-        oc = st.columns(6 if is_sell else 5)
+        oc = st.columns(5)
         oleg = oc[0].selectbox("Leg", ostr.LEGS, format_func=lambda l: LEG_NAMES[l],
                                key="opt_opt_leg")
         orank = oc[1].selectbox("Rank by", ["exp", "pf", "green_months", "sharpe", "net"],
                                 key="opt_opt_rank")
         omin = oc[2].number_input("Min trades", 20, 3000, 100, 10, key="opt_opt_min")
         ogreen = oc[3].number_input("Min green months %", 0, 100, 0, 5, key="opt_opt_green")
-        sweep_delta = False
-        if is_sell:
-            sweep_delta = oc[4].toggle("Sweep sell Δ", key="opt_opt_swd",
-                                       help="Also sweep the sold option's delta over "
-                                            "0.2–0.8 to find whether a lower (OTM) delta "
-                                            "makes premium-selling profitable.")
-        run_col = oc[5] if is_sell else oc[4]
         st.caption(f"Sweeps {LEG_NAMES[oleg]} over {oleg}'s grid on the selected period "
                    f"({split_name if res else st.session_state['opt_split']}), using the "
-                   "current Buy/Sell + cost settings."
-                   + (" · **Sell Δ swept 0.2→0.8**" if sweep_delta else ""))
-        if run_col.button("🔎 Optimize", key="opt_opt_run"):
+                   "current cost settings.")
+        if oc[4].button("🔎 Optimize", key="opt_opt_run"):
             import credits
             if credits.try_charge("ib50_optimizer"):
                 cfg = _cfg_from_state()
                 prog = st.progress(0.0, text="Sweeping…")
                 rdf = ostr.optimize_leg(days, cfg, oleg, rank=orank,
                                         min_trades=int(omin), min_green=int(ogreen),
-                                        sweep_delta=sweep_delta,
                                         progress=lambda k, n: prog.progress(k / n,
                                                  text=f"{k}/{n} configs…"))
                 prog.empty()

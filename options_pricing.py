@@ -4,10 +4,7 @@ Strategy mode. Pure functions, no Streamlit. Vectorized where it matters.
 
 Model: Black-Scholes European, flat IV (the "synthetic premiums (flat IV)"
 convention). Spot-only data → we PRICE options off the index, we do not use
-real premiums. Two position styles:
-  • BUY  : long the ATM (~0.5Δ) option in the trade direction.
-  • SELL : short a `target_delta` (default 0.8) OPPOSITE-type option — bullish
-           view → short PUT, bearish → short CALL (paid-to-be-directional).
+real premiums. Position: long the ATM (~0.5Δ) option in the trade direction.
 
 Conventions
   • Strikes on a 50-point grid (NIFTY). ATM = nearest 50 to spot.
@@ -85,30 +82,10 @@ def bs_price(S, K, T, iv, is_call, r=R_ANNUAL):
     return _ncdf(-d2) * np.asarray(K, float) * disc - _ncdf(-d1) * np.asarray(S, float)
 
 
-def bs_delta(S, K, T, iv, is_call, r=R_ANNUAL):
-    d1 = _d1(S, K, T, iv, r)
-    return _ncdf(d1) if is_call else _ncdf(d1) - 1.0
-
-
 # ─── strike selection ─────────────────────────────────────────────────────────
 
 def atm_strike(spot: float) -> float:
     return round(spot / STRIKE_STEP) * STRIKE_STEP
-
-
-def strike_for_delta(spot, T, iv, is_call, target_delta=0.8, r=R_ANNUAL) -> float:
-    """
-    Strike (snapped to the 50-grid) whose |delta| ≈ target_delta.
-    Closed-form BS delta inversion:  d1* = Φ⁻¹(target) (call) → K = S·exp(...).
-    A 0.8Δ call is ITM (K<S); a 0.8Δ put is ITM (K>S).
-    """
-    T = max(float(T), 1e-9)
-    td = abs(target_delta)
-    # invert Φ(d1) = td (call) or Φ(d1) = 1-td (put)
-    from statistics import NormalDist
-    d1_star = NormalDist().inv_cdf(td if is_call else (1.0 - td))
-    K = spot * math.exp(-(d1_star * iv * math.sqrt(T)) + (r + 0.5 * iv * iv) * T)
-    return round(K / STRIKE_STEP) * STRIKE_STEP
 
 
 # ─── cost model ───────────────────────────────────────────────────────────────

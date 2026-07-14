@@ -1,9 +1,8 @@
 """
 option_strategy.py — NIFTY Option Strategy engine (three legs + portfolio).
 
-Legs (all: long-ATM-option BUY variant, or short-0.8Δ-opposite SELL variant;
-1 lot; ≤1 trade/day; flat 15:15; stops/targets in % of PDC on the SPOT,
-translated to option P&L via options_pricing):
+Legs (all: long the ATM option; 1 lot; ≤1 trade/day; flat 15:15; stops/targets
+in % of PDC on the SPOT, translated to option P&L via options_pricing):
 
   T1  Trend-Ride  — first 3-min close beyond PDH/PDL before 13:00, EMA + VWAP
                     filters; stop 0.5% PDC, trail 1.2% PDC.
@@ -30,8 +29,7 @@ IB_END = OPEN_T + 60 - 1        # 10:14
 LEGS = ("T1", "GF", "ORB")
 
 DEFAULTS = {
-    "iv": 0.13, "lots": 1, "variant": "buy",         # buy | sell
-    "sell_delta": 0.8,
+    "iv": 0.13, "lots": 1,                            # long the ATM option (buy only)
     "slippage_pts": 0.5, "brokerage": 20.0,
     "cost_mult": 1.0, "slip_mult": 1.0,
     "T1":  {"on": True, "ema_gap_pct": 0.05, "stop_pct": 0.5, "trail_pct": 1.2,
@@ -91,30 +89,22 @@ def prep_days(mdf: pd.DataFrame):
 # ─── option P&L for one resolved trade ────────────────────────────────────────
 
 def _price_trade(rec, bullish, entry_t, entry_spot, exit_t, exit_spot, cfg):
-    """Turn a resolved spot trade into an option position P&L (₹, all costs)."""
-    iv, variant = cfg["iv"], cfg["variant"]
+    """Turn a resolved spot trade into a LONG ATM option P&L (₹, all costs)."""
+    iv = cfg["iv"]
     dt_e = rec["date"] + pd.Timedelta(minutes=int(entry_t))
     dt_x = rec["date"] + pd.Timedelta(minutes=int(exit_t))
     Te, Tx = op.tte_years(dt_e), op.tte_years(dt_x)
 
-    if variant == "buy":
-        is_call = bullish                       # long the option in trade direction
-        K = op.atm_strike(entry_spot)
-        pe = float(op.bs_price(entry_spot, K, Te, iv, is_call))
-        px = float(op.bs_price(exit_spot, K, Tx, iv, is_call))
-        pts = px - pe                            # long
-    else:                                        # SELL 0.8Δ opposite option
-        is_call = not bullish                   # bullish → short PUT ; bearish → short CALL
-        K = op.strike_for_delta(entry_spot, Te, iv, is_call, cfg["sell_delta"])
-        pe = float(op.bs_price(entry_spot, K, Te, iv, is_call))
-        px = float(op.bs_price(exit_spot, K, Tx, iv, is_call))
-        pts = pe - px                            # short
+    is_call = bullish                            # long the option in trade direction
+    K = op.atm_strike(entry_spot)
+    pe = float(op.bs_price(entry_spot, K, Te, iv, is_call))
+    px = float(op.bs_price(exit_spot, K, Tx, iv, is_call))
+    pts = px - pe                                # long
 
     cost = op.round_trip_cost(pe, px, cfg["lots"], cfg["slippage_pts"],
                               cfg["brokerage"], cfg["cost_mult"], cfg["slip_mult"])
     pnl = pts * op.LOT_SIZE * cfg["lots"] - cost
-    otype = "CE" if is_call else "PE"
-    return dict(strike=K, opt=("+" if variant == "buy" else "-") + otype,
+    return dict(strike=K, opt="+" + ("CE" if is_call else "PE"),
                 entry_prem=round(pe, 2), exit_prem=round(px, 2),
                 points=round(pts, 2), cost=round(cost, 1), pnl=round(pnl, 1))
 
@@ -346,31 +336,20 @@ OPT_GRIDS = {
 }
 
 
-DELTA_SWEEP = [0.2, 0.3, 0.4, 0.5, 0.65, 0.8]     # for the SELL variant
-
-
 def optimize_leg(days, base_cfg, leg, rank="exp", min_trades=100,
-                 min_green=0, sweep_delta=False, progress=None):
+                 min_green=0, progress=None):
     """
     Sweep the leg's parameter grid; one row per config with full metrics.
-    rank ∈ {exp, pf, green_months, sharpe, net}. Non-cliff check is visual
-    (all rows shown). Uses the current buy/sell variant + cost settings.
-
-    sweep_delta (SELL variant only): also sweeps the sold option's |delta| over
-    DELTA_SWEEP, so you can find whether a lower (OTM) delta turns premium-
-    selling profitable on trend legs.
+    rank ∈ {exp, pf, green_months, sharpe, net}. All rows returned so parameter
+    cliffs are visible. Uses the current cost settings.
     """
     import copy, itertools
     grid = OPT_GRIDS[leg]
     keys = list(grid)
-    deltas = (DELTA_SWEEP if (sweep_delta and base_cfg["variant"] == "sell")
-              else [base_cfg["sell_delta"]])
-    combos = [(v, dlt) for v in itertools.product(*[grid[k] for k in keys])
-              for dlt in deltas]
+    combos = list(itertools.product(*[grid[k] for k in keys]))
     rows = []
-    for i, (vals, dlt) in enumerate(combos):
+    for i, vals in enumerate(combos):
         cfg = copy.deepcopy(base_cfg)
-        cfg["sell_delta"] = dlt
         for k, v in zip(keys, vals):
             cfg[leg][k] = v
         if leg == "GF" and cfg["GF"]["gap_min"] >= cfg["GF"]["gap_max"]:
@@ -382,8 +361,6 @@ def optimize_leg(days, base_cfg, leg, rank="exp", min_trades=100,
             m = metrics(t)
             if m["green_pct"] >= min_green:
                 row = {k: vals[j] for j, k in enumerate(keys)}
-                if len(deltas) > 1:
-                    row["sell_Δ"] = dlt
                 row.update(trades=m["n"], exp=round(m["exp"], 0),
                            win_pct=round(m["win"], 1),
                            pf=round(m["pf"], 2) if np.isfinite(m["pf"]) else 99,
