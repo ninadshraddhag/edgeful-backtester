@@ -447,6 +447,42 @@ def render():
     else:
         st.info("Rebuild the facts table (`python build_facts.py`) to enable this stat.")
 
+    # ── close location (75% / 25%) — stronger confirmation ────────────────────
+    loc_col = f"{tag}_close_loc"
+    if loc_col in sub.columns:
+        thr = st.slider(f"Close-location threshold — how deep into the {tag.upper()} "
+                        "range the close must be", 55, 95, 75, 5, key=f"f_closeloc_{tag}",
+                        help="75 = close in the upper 75% of the range for the bullish "
+                             "check (and lower 25% for the bearish check). Stronger than "
+                             "the midpoint (50).")
+        up_thr, dn_thr = thr / 100.0, 1.0 - thr / 100.0
+        st.markdown(f"#### {tag.upper()} close beyond {thr}% of range — stronger fade confirmation")
+        lf_q = lf[lf[loc_col] >= up_thr]       # low first AND close in upper thr%
+        hf_q = hf[hf[loc_col] <= dn_thr]       # high first AND close in lower (100-thr)%
+        qp = st.columns(2)
+        with qp[0]:
+            if len(lf_q):
+                base_a = pct((lf[f"{tag}_break_first"] == "high").mean()) if len(lf) else "—"
+                qp[0].metric(f"LOW first + close ≥{thr}% → HIGH breaks FIRST  (n={len(lf_q):,})",
+                             pct((lf_q[f"{tag}_break_first"] == "high").mean()),
+                             f"vs {base_a} for all low-first days")
+            else:
+                st.info(f"No days: low first + close ≥{thr}% of range.")
+        with qp[1]:
+            if len(hf_q):
+                base_b = pct((hf[f"{tag}_break_first"] == "low").mean()) if len(hf) else "—"
+                qp[1].metric(f"HIGH first + close ≤{100-thr}% → LOW breaks FIRST  (n={len(hf_q):,})",
+                             pct((hf_q[f"{tag}_break_first"] == "low").mean()),
+                             f"vs {base_b} for all high-first days")
+            else:
+                st.info(f"No days: high first + close ≤{100-thr}% of range.")
+        st.caption(f"Close location = (close − low) ÷ range. A close in the upper {thr}% "
+                   "after the LOW formed first is a stronger 'already-faded' signal than "
+                   "just clearing the midpoint — the deeper the reversal close, the more "
+                   "the first move is confirmed dead.")
+    else:
+        st.info("Rebuild the facts table to enable the close-location (75%) stat.")
+
     # ── EXTENSIONS & RETRACEMENTS ─────────────────────────────────────────────
     # Measured ONLY on SINGLE-BREAK days — days where exactly ONE side of the
     # window broke. Bull = only the HIGH broke (clean upside day), Bear = only

@@ -1089,6 +1089,10 @@ def daywise_mode():
             "long_close_above": st.checkbox(
                 "LONG only if IB closes ABOVE midpoint", key="dw_flt_lc",
                 help="IB's last candle closes above (IB High+Low)/2 → bullish confirmation."),
+            "long_close_above75": st.checkbox(
+                "LONG only if IB closes in upper 75% of range", key="dw_flt_lc75",
+                help="Stronger confirmation than the midpoint: IB closes at or above "
+                     "the 75% level (Low + 0.75×range). Combine with 'LOW formed first'."),
             "long_first_green": st.checkbox(
                 f"LONG only if first {fc_min}-min candle is GREEN", key="dw_flt_lg",
                 help="Close at the end of the window above the session open → bullish bias."),
@@ -1098,6 +1102,10 @@ def daywise_mode():
             "short_close_below": st.checkbox(
                 "SHORT only if IB closes BELOW midpoint", key="dw_flt_sc",
                 help="IB's last candle closes below the midpoint → bearish confirmation."),
+            "short_close_below25": st.checkbox(
+                "SHORT only if IB closes in lower 25% of range", key="dw_flt_sc25",
+                help="Stronger confirmation than the midpoint: IB closes at or below "
+                     "the 25% level (Low + 0.25×range). Combine with 'HIGH formed first'."),
             "short_first_red": st.checkbox(
                 f"SHORT only if first {fc_min}-min candle is RED", key="dw_flt_sr",
                 help="Close at the end of the window below the session open → bearish bias."),

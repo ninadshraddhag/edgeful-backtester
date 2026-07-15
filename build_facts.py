@@ -299,6 +299,8 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
                 f"{tag}_high": hi, f"{tag}_low": lo, f"{tag}_range": round(rng, 2),
                 f"{tag}_close": win_close,
                 f"{tag}_close_above_mid": bool(win_close > (hi + lo) / 2),
+                # close location within the window range: 0 = at low, 1 = at high
+                f"{tag}_close_loc": round((win_close - lo) / rng, 4) if rng > 0 else 0.5,
                 f"{tag}_first_side": first_side,
                 f"{tag}_high_break": hb, f"{tag}_low_break": lb,
                 f"{tag}_both_break": hb and lb,

@@ -105,6 +105,7 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
             "close": float(sess.iloc[-1]["close"]),     # close AT the square-off
             "first_side": first_side,
             "close_above_mid": ib_close > (H + L) / 2,
+            "close_loc": ((ib_close - L) / (H - L)) if (H - L) > 0 else 0.5,
             "ft": f0["t_min"].values.astype(float),
             "fc": f0["close"].values.astype(float),
             "ph": post["high"].values.astype(float),
@@ -266,12 +267,14 @@ def first_candle_dir(rec, n_min):
 def dir_allowed(rec, is_long, dir_filters):
     """
     Optional IB directional filters (all default off):
-      long_first_low    — LONG only if the IB LOW formed first (high later)
-      long_close_above  — LONG only if the IB closed above its midpoint
-      long_first_green  — LONG only if the first `candle_min`-min candle is GREEN
-      short_first_high  — SHORT only if the IB HIGH formed first (low later)
-      short_close_below — SHORT only if the IB closed below its midpoint
-      short_first_red   — SHORT only if the first `candle_min`-min candle is RED
+      long_first_low     — LONG only if the IB LOW formed first (high later)
+      long_close_above   — LONG only if the IB closed above its midpoint (50%)
+      long_close_above75 — LONG only if the IB closed in the upper 75% of range
+      long_first_green   — LONG only if the first `candle_min`-min candle is GREEN
+      short_first_high   — SHORT only if the IB HIGH formed first (low later)
+      short_close_below  — SHORT only if the IB closed below its midpoint (50%)
+      short_close_below25— SHORT only if the IB closed in the lower 25% of range
+      short_first_red    — SHORT only if the first `candle_min`-min candle is RED
     """
     if not dir_filters:
         return True
@@ -281,12 +284,16 @@ def dir_allowed(rec, is_long, dir_filters):
             return False
         if dir_filters.get("long_close_above") and not rec.get("close_above_mid", True):
             return False
+        if dir_filters.get("long_close_above75") and rec.get("close_loc", 1.0) < 0.75:
+            return False
         if dir_filters.get("long_first_green") and first_candle_dir(rec, n_min) != 1:
             return False
     else:
         if dir_filters.get("short_first_high") and rec.get("first_side") != "high":
             return False
         if dir_filters.get("short_close_below") and rec.get("close_above_mid", False):
+            return False
+        if dir_filters.get("short_close_below25") and rec.get("close_loc", 0.0) > 0.25:
             return False
         if dir_filters.get("short_first_red") and first_candle_dir(rec, n_min) != -1:
             return False
