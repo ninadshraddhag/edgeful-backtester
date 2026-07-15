@@ -561,7 +561,41 @@ def render():
                  help="PDH or PDL (or both) touched within the same session.")
     hp[3].metric("Touch NEITHER", pct(1 - _pd_e.mean()))
     st.caption(f"Current slice ({len(sub):,} days — every sidebar filter applied). "
-               "The three setup cards below respond to date & day-of-week only.")
+               "The cards below respond to date & day-of-week only.")
+
+    # ── opens INSIDE the prior range → touch odds ─────────────────────────────
+    if {"day_open", "pdh", "pdl"}.issubset(pdset.columns):
+        rng = pdset["pdh"] - pdset["pdl"]
+        inside = pdset[(pdset["day_open"] >= pdset["pdl"]) &
+                       (pdset["day_open"] <= pdset["pdh"]) & (rng > 0)].copy()
+        st.markdown("##### Opens INSIDE the prior range → touch odds")
+        if len(inside):
+            ie = inside["broke_pdh"] | inside["broke_pdl"]
+            ic = st.columns(4)
+            ic[0].metric("Touch PDH", pct(inside["broke_pdh"].mean()))
+            ic[1].metric("Touch PDL", pct(inside["broke_pdl"].mean()))
+            ic[2].metric("Touch EITHER", pct(ie.mean()),
+                         help="Opened between PDL and PDH → reaches PDH or PDL "
+                              "(or both) by session close.")
+            ic[3].metric("Reach NEITHER", pct(1 - ie.mean()),
+                         f"{len(inside):,} inside-open days")
+            # bias by where in the range it opened
+            pos = (inside["day_open"] - inside["pdl"]) / (inside["pdh"] - inside["pdl"])
+            lo_h, up_h = inside[pos < 0.5], inside[pos >= 0.5]
+            hb = st.columns(2)
+            if len(lo_h):
+                hb[0].metric(f"Opens LOWER half → touch PDL  (n={len(lo_h):,})",
+                             pct(lo_h["broke_pdl"].mean()),
+                             f"touch PDH: {pct(lo_h['broke_pdh'].mean())}")
+            if len(up_h):
+                hb[1].metric(f"Opens UPPER half → touch PDH  (n={len(up_h):,})",
+                             pct(up_h["broke_pdh"].mean()),
+                             f"touch PDL: {pct(up_h['broke_pdl'].mean())}")
+            st.caption("Days that OPEN between PDL and PDH (no gap beyond the prior "
+                       "range). Where in the range it opens biases which level it "
+                       "reaches — opens near PDL gravitate to PDL, near PDH to PDH.")
+        else:
+            st.info("No inside-the-range opens in this slice.")
 
     pc = st.columns(3)
     # inside-day breakout: yesterday was an inside day
