@@ -75,6 +75,7 @@ def _first_extreme_side(win, hi, lo):
 
 
 def _breach(post, hi, lo):
+    """WICK breach: a level counts as broken the instant price trades through it."""
     if post.empty:
         return False, False, "none"
     hi_mask = post["high"] > hi
@@ -82,6 +83,27 @@ def _breach(post, hi, lo):
     hb, lb = bool(hi_mask.any()), bool(lo_mask.any())
     t_hi = post.loc[hi_mask, "t_min"].min() if hb else np.nan
     t_lo = post.loc[lo_mask, "t_min"].min() if lb else np.nan
+    if hb and lb:
+        first = "high" if t_hi < t_lo else ("low" if t_lo < t_hi else "high")
+    elif hb:
+        first = "high"
+    elif lb:
+        first = "low"
+    else:
+        first = "none"
+    return hb, lb, first
+
+
+def _breach_close(post_tf, hi, lo):
+    """CLOSE breach: a level counts as broken only when a resampled (e.g. 3-min)
+    candle CLOSES beyond it — stricter than the wick definition."""
+    if post_tf is None or post_tf.empty:
+        return False, False, "none"
+    hi_mask = post_tf["close"] > hi
+    lo_mask = post_tf["close"] < lo
+    hb, lb = bool(hi_mask.any()), bool(lo_mask.any())
+    t_hi = post_tf.loc[hi_mask, "t_min"].min() if hb else np.nan
+    t_lo = post_tf.loc[lo_mask, "t_min"].min() if lb else np.nan
     if hb and lb:
         first = "high" if t_hi < t_lo else ("low" if t_lo < t_hi else "high")
     elif hb:
@@ -294,6 +316,10 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
             hb, lb, bfirst = _breach(post, hi, lo)
             up_ext, dn_ext, up_retr, dn_retr = _excursion(post, hi, lo, rng)
             bc = 2 if (hb and lb) else (1 if (hb or lb) else 0)
+            # 3-min-CLOSE breach variant (stricter): resample post to 3-min bars
+            post3 = to_timeframe(post, 3, open_t) if not post.empty else post
+            hb_c, lb_c, bfirst_c = _breach_close(post3, hi, lo)
+            bc_c = 2 if (hb_c and lb_c) else (1 if (hb_c or lb_c) else 0)
 
             rec.update({
                 f"{tag}_high": hi, f"{tag}_low": lo, f"{tag}_range": round(rng, 2),
@@ -306,6 +332,11 @@ def build_from_minute(df, name, open_t=None, close_t=DEFAULT_CLOSE_T,
                 f"{tag}_both_break": hb and lb,
                 f"{tag}_one_side": bc == 1, f"{tag}_no_break": bc == 0,
                 f"{tag}_break_first": bfirst, f"{tag}_break_count": bc,
+                # 3-min-close breach variant (suffix _c)
+                f"{tag}_high_break_c": hb_c, f"{tag}_low_break_c": lb_c,
+                f"{tag}_both_break_c": hb_c and lb_c,
+                f"{tag}_one_side_c": bc_c == 1, f"{tag}_no_break_c": bc_c == 0,
+                f"{tag}_break_first_c": bfirst_c, f"{tag}_break_count_c": bc_c,
                 f"{tag}_up_ext":  round(up_ext, 4)  if pd.notna(up_ext)  else np.nan,
                 f"{tag}_dn_ext":  round(dn_ext, 4)  if pd.notna(dn_ext)  else np.nan,
                 f"{tag}_up_retr": round(up_retr, 4) if pd.notna(up_retr) else np.nan,

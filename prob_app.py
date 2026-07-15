@@ -136,18 +136,20 @@ def parse_query(q: str) -> dict:
 
 # ─── stats ────────────────────────────────────────────────────────────────────
 
-def stats(sub, tag):
+def stats(sub, tag, suf=""):
+    """Break stats for `tag` window. suf='' = wick breach, '_c' = 3-min close."""
     n = len(sub)
     if n == 0:
         return None
-    bf = sub[f"{tag}_break_first"].value_counts(normalize=True)
+    fcol = f"{tag}_break_first{suf}"
+    bf = sub[fcol].value_counts(normalize=True) if fcol in sub.columns \
+        else sub[f"{tag}_break_first"].value_counts(normalize=True)
+    g = lambda c: sub[f"{tag}_{c}{suf}"].mean() if f"{tag}_{c}{suf}" in sub.columns \
+        else sub[f"{tag}_{c}"].mean()
     return {
         "n": n,
-        "high": sub[f"{tag}_high_break"].mean(),
-        "low":  sub[f"{tag}_low_break"].mean(),
-        "both": sub[f"{tag}_both_break"].mean(),
-        "one":  sub[f"{tag}_one_side"].mean(),
-        "none": sub[f"{tag}_no_break"].mean(),
+        "high": g("high_break"), "low": g("low_break"), "both": g("both_break"),
+        "one": g("one_side"), "none": g("no_break"),
         "first_high": bf.get("high", 0.0),
         "first_low":  bf.get("low", 0.0),
     }
@@ -253,6 +255,12 @@ def render():
                         help="Length of the Initial Balance window from the open, in "
                              "10-min steps (e.g. 40, 50). Non-60 values recompute the "
                              "stats live (cached).")
+        breach_mode = st.radio("Breach counts as", ["Wick (any touch)", "3-min close"],
+                               key="f_breach",
+                               help="Wick = a level is broken the instant price trades "
+                                    "through it. 3-min close = a level is broken only "
+                                    "when a 3-minute candle CLOSES beyond it (stricter).")
+        bsuf = "_c" if breach_mode.startswith("3-min") else ""
         tag  = "ib" if st.session_state["f_setup"].startswith("IB") else "orb"
 
         # data slice for the chosen instrument + session
@@ -369,8 +377,8 @@ def render():
     if fc_dir != "Any": bits.append(f"first {fc_dur}m {fc_dir.lower()}")
     st.subheader("  ·  ".join(str(b) for b in bits))
 
-    s = stats(sub, tag)
-    b = stats(baseline, tag)
+    s = stats(sub, tag, bsuf)
+    b = stats(baseline, tag, bsuf)
     if s is None or b is None:
         st.warning("No days match these filters. Loosen them.")
         st.stop()
@@ -405,13 +413,13 @@ def render():
     with fm[0]:
         if len(hf):
             fm[0].metric(f"HIGH formed first → LOW breaks FIRST  (n={len(hf):,})",
-                         pct((hf[f"{tag}_break_first"] == "low").mean()))
+                         pct((hf[f"{tag}_break_first{bsuf}"] == "low").mean()))
         else:
             st.info("No 'high formed first' days in this slice.")
     with fm[1]:
         if len(lf):
             fm[1].metric(f"LOW formed first → HIGH breaks FIRST  (n={len(lf):,})",
-                         pct((lf[f"{tag}_break_first"] == "high").mean()))
+                         pct((lf[f"{tag}_break_first{bsuf}"] == "high").mean()))
         else:
             st.info("No 'low formed first' days in this slice.")
 
@@ -425,19 +433,19 @@ def render():
         mp = st.columns(2)
         with mp[0]:
             if len(lf_conf):
-                base_a = pct((lf[f"{tag}_break_first"] == "high").mean()) if len(lf) else "—"
+                base_a = pct((lf[f"{tag}_break_first{bsuf}"] == "high").mean()) if len(lf) else "—"
                 mp[0].metric("LOW formed first + close ABOVE mid → HIGH breaks FIRST  "
                              f"(n={len(lf_conf):,})",
-                             pct((lf_conf[f"{tag}_break_first"] == "high").mean()),
+                             pct((lf_conf[f"{tag}_break_first{bsuf}"] == "high").mean()),
                              f"vs {base_a} for all low-formed-first days")
             else:
                 st.info("No days: low formed first + close above mid.")
         with mp[1]:
             if len(hf_conf):
-                base_b = pct((hf[f"{tag}_break_first"] == "low").mean()) if len(hf) else "—"
+                base_b = pct((hf[f"{tag}_break_first{bsuf}"] == "low").mean()) if len(hf) else "—"
                 mp[1].metric("HIGH formed first + close BELOW mid → LOW breaks FIRST  "
                              f"(n={len(hf_conf):,})",
-                             pct((hf_conf[f"{tag}_break_first"] == "low").mean()),
+                             pct((hf_conf[f"{tag}_break_first{bsuf}"] == "low").mean()),
                              f"vs {base_b} for all high-formed-first days")
             else:
                 st.info("No days: high formed first + close below mid.")
@@ -462,17 +470,17 @@ def render():
         qp = st.columns(2)
         with qp[0]:
             if len(lf_q):
-                base_a = pct((lf[f"{tag}_break_first"] == "high").mean()) if len(lf) else "—"
+                base_a = pct((lf[f"{tag}_break_first{bsuf}"] == "high").mean()) if len(lf) else "—"
                 qp[0].metric(f"LOW first + close ≥{thr}% → HIGH breaks FIRST  (n={len(lf_q):,})",
-                             pct((lf_q[f"{tag}_break_first"] == "high").mean()),
+                             pct((lf_q[f"{tag}_break_first{bsuf}"] == "high").mean()),
                              f"vs {base_a} for all low-first days")
             else:
                 st.info(f"No days: low first + close ≥{thr}% of range.")
         with qp[1]:
             if len(hf_q):
-                base_b = pct((hf[f"{tag}_break_first"] == "low").mean()) if len(hf) else "—"
+                base_b = pct((hf[f"{tag}_break_first{bsuf}"] == "low").mean()) if len(hf) else "—"
                 qp[1].metric(f"HIGH first + close ≤{100-thr}% → LOW breaks FIRST  (n={len(hf_q):,})",
-                             pct((hf_q[f"{tag}_break_first"] == "low").mean()),
+                             pct((hf_q[f"{tag}_break_first{bsuf}"] == "low").mean()),
                              f"vs {base_b} for all high-first days")
             else:
                 st.info(f"No days: high first + close ≤{100-thr}% of range.")
@@ -490,8 +498,8 @@ def render():
     # genuine directional days.
     st.divider()
     st.markdown(f"#### Extensions & Retracements  ·  measured in × {tag.upper()} range")
-    hi_only = sub[sub[f"{tag}_high_break"] & ~sub[f"{tag}_low_break"]]
-    lo_only = sub[sub[f"{tag}_low_break"] & ~sub[f"{tag}_high_break"]]
+    hi_only = sub[sub[f"{tag}_high_break{bsuf}"] & ~sub[f"{tag}_low_break{bsuf}"]]
+    lo_only = sub[sub[f"{tag}_low_break{bsuf}"] & ~sub[f"{tag}_high_break{bsuf}"]]
     n_hi, n_lo = len(hi_only), len(lo_only)
     up_ext = hi_only[f"{tag}_up_ext"].dropna()
     dn_ext = lo_only[f"{tag}_dn_ext"].dropna()
@@ -658,10 +666,10 @@ def render():
             continue
         bkt_rows.append({
             "Gap bucket": bkt, "days": len(x),
-            "HIGH breaks %":  round(x[f"{tag}_high_break"].mean() * 100, 1),
-            "LOW breaks %":   round(x[f"{tag}_low_break"].mean() * 100, 1),
-            "BOTH %":         round(x[f"{tag}_both_break"].mean() * 100, 1),
-            "NEITHER %":      round(x[f"{tag}_no_break"].mean() * 100, 1),
+            "HIGH breaks %":  round(x[f"{tag}_high_break{bsuf}"].mean() * 100, 1),
+            "LOW breaks %":   round(x[f"{tag}_low_break{bsuf}"].mean() * 100, 1),
+            "BOTH %":         round(x[f"{tag}_both_break{bsuf}"].mean() * 100, 1),
+            "NEITHER %":      round(x[f"{tag}_no_break{bsuf}"].mean() * 100, 1),
             "reach PDH %":    round(x["broke_pdh"].mean() * 100, 1),
             "reach PDL %":    round(x["broke_pdl"].mean() * 100, 1),
             "PD either %":    round((x["broke_pdh"] | x["broke_pdl"]).mean() * 100, 1),
@@ -692,12 +700,12 @@ def render():
         st.plotly_chart(fig, use_container_width=True)
     with g2:
         present = [d for d in DOW_ORDER if d in sub["dow"].unique()]
-        dow_tbl = (sub.groupby("dow")[[f"{tag}_high_break", f"{tag}_low_break"]]
+        dow_tbl = (sub.groupby("dow")[[f"{tag}_high_break{bsuf}", f"{tag}_low_break{bsuf}"]]
                    .mean().reindex(present))
         fig2 = go.Figure()
-        fig2.add_bar(name="HIGH breaks", x=dow_tbl.index, y=dow_tbl[f"{tag}_high_break"]*100,
+        fig2.add_bar(name="HIGH breaks", x=dow_tbl.index, y=dow_tbl[f"{tag}_high_break{bsuf}"]*100,
                      marker_color="#4CAF50")
-        fig2.add_bar(name="LOW breaks", x=dow_tbl.index, y=dow_tbl[f"{tag}_low_break"]*100,
+        fig2.add_bar(name="LOW breaks", x=dow_tbl.index, y=dow_tbl[f"{tag}_low_break{bsuf}"]*100,
                      marker_color="#F44336")
         fig2.update_layout(title="Break rate by day of week (current slice)", barmode="group",
                            height=360, template="plotly_dark", yaxis_title="%",
@@ -707,7 +715,7 @@ def render():
 
     # ── slice table + download ────────────────────────────────────────────────
     show_cols = ["date", "dow", "gap_type", "gap_bucket", "day_kind", f"{tag}_range",
-                 f"{tag}_first_side", f"{tag}_high_break", f"{tag}_low_break",
+                 f"{tag}_first_side", f"{tag}_high_break{bsuf}", f"{tag}_low_break{bsuf}",
                  f"{tag}_up_ext", f"{tag}_dn_ext", "broke_pdh", "broke_pdl"]
     with st.expander(f"Matching days ({s['n']:,})"):
         st.dataframe(sub[show_cols].sort_values("date", ascending=False),
@@ -717,7 +725,7 @@ def render():
                        file_name="prob_slice.csv", mime="text/csv")
 
     # ── day browser: chart every matching day with its levels ────────────────
-    _render_day_browser(sub, inst, session, tag, ib_min)
+    _render_day_browser(sub, inst, session, tag, ib_min, bsuf)
 
 
 # ─── day browser ──────────────────────────────────────────────────────────────
@@ -726,7 +734,7 @@ def _fmt_x(v, unit="×"):
     return "—" if pd.isna(v) else f"{v:.2f}{unit}"
 
 
-def _render_day_browser(sub, inst, session, tag, ib_min):
+def _render_day_browser(sub, inst, session, tag, ib_min, bsuf=""):
     """Step through every matching day with a clean candlestick chart + levels."""
     st.divider()
     st.markdown("#### 📅 Day browser — every matching day, charted with levels")
