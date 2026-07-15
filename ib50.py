@@ -31,6 +31,7 @@ import pandas as pd
 import daywise                      # green_months (month-on-month consistency)
 
 import indicators as ind
+import build_facts
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 TRADING_DAYS = 252
@@ -99,6 +100,14 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
               else np.zeros(0, dtype=bool))
         lb = (np.maximum.accumulate(pl_arr < L).astype(bool) if len(pl_arr)
               else np.zeros(0, dtype=bool))
+        # 3-min-CLOSE breach state: True from the bar at/after a 3-min candle
+        # first CLOSES beyond the IB (stricter than the wick states above)
+        pt_arr = post["t_min"].to_numpy(float)
+        post3 = build_facts.to_timeframe(post, 3, open_t)
+        _c3, _t3 = post3["close"].to_numpy(), post3["t_min"].to_numpy()
+        _hi = np.where(_c3 > H)[0]; _lo = np.where(_c3 < L)[0]
+        hb_c = (pt_arr >= _t3[_hi[0]]) if len(_hi) else np.zeros(len(pt_arr), bool)
+        lb_c = (pt_arr >= _t3[_lo[0]]) if len(_lo) else np.zeros(len(pt_arr), bool)
 
         # 5-min VWAP step + 5-min-close marker for the VWAP-close EXIT (the
         # direction VOTE keeps the 1-min VWAP `pv`; entries/SL/TP stay 1-min)
@@ -116,6 +125,7 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
             "pv": vwap[post_mask].to_numpy(float),     # 1-min VWAP (direction vote)
             "pv5": pv5_full[pm], "is5": is5_full[pm],  # 5-min VWAP (exit only)
             "hb": hb, "lb": lb,
+            "hb_c": hb_c, "lb_c": lb_c,                 # 3-min-close breach state
         })
     return out
 
@@ -189,7 +199,11 @@ def sim_day(rec, cfg) -> list:
     risk, pvval = cfg["risk_usd"], cfg.get("point_value", 1.0)
     use_vwap, logic = cfg["use_vwap"], cfg["logic"]
     reentry = cfg["allow_reentry"]
-    hb, lb = rec["hb"], rec["lb"]                  # precomputed cumulative breach state
+    # precomputed cumulative breach state — wick (default) or 3-min-close
+    if cfg.get("breach_use_close") and "hb_c" in rec:
+        hb, lb = rec["hb_c"], rec["lb_c"]
+    else:
+        hb, lb = rec["hb"], rec["lb"]
     # realism guard: require the breach to be confirmed on a PRIOR (closed) bar, so
     # the breakout candle and the retrace-entry candle can't be the same 1-min bar.
     # DEFAULT TRUE — realistic fills everywhere unless a caller explicitly opts out

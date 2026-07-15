@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 import indicators as ind
+import build_facts
 
 DEFAULT_OPEN_T  = 9 * 60 + 15   # 09:15 (NSE); auto-detected per instrument in the app
 DEFAULT_CLOSE_T = 15 * 60 + 15  # 15:15 square-off — positions force-exit, no overnight carry
@@ -98,6 +99,14 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
         pv5_full, is5_full = ind.vwap5_steps(sess, open_t, VWAP_EXIT_TF)
         post_mask = (sess["t_min"].to_numpy() > ib_end)
 
+        # 3-min-CLOSE breach times (for the optional close-breach entry gate):
+        # minute of the first 3-min post-IB candle that CLOSES beyond H / L.
+        post3 = build_facts.to_timeframe(post, 3, open_t)
+        _c3, _t3 = post3["close"].to_numpy(), post3["t_min"].to_numpy()
+        _hi = np.where(_c3 > H)[0]; _lo = np.where(_c3 < L)[0]
+        b3_hi_bt = float(_t3[_hi[0]]) if len(_hi) else None
+        b3_lo_bt = float(_t3[_lo[0]]) if len(_lo) else None
+
         out[dow].append({
             "date": pd.Timestamp(day), "dow": dow,
             "H": float(H), "L": float(L), "Rg": float(Rg),
@@ -114,6 +123,7 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
             "pc": post["close"].values.astype(float),     # post-IB 1-min closes
             "pv5": pv5_full[post_mask],                    # 5-min VWAP (exit reference)
             "is5": is5_full[post_mask],                    # True at each 5-min close
+            "b3_hi_bt": b3_hi_bt, "b3_lo_bt": b3_lo_bt,    # 3-min-close breach minutes
         })
     return out
 
@@ -180,7 +190,7 @@ def _sim_dir(ph, pl, start, entry, stop, tp1, tp2, is_long, close,
 
 
 def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
-              entry_cond="any", vwap_exit=False):
+              entry_cond="any", vwap_exit=False, breach_close=False):
     """
     One directional trade on one day. Returns (pnl, outcome, entry, risk) or None.
     entry_cond:
@@ -210,8 +220,14 @@ def trade_pnl(rec, entry_pct, stop_pct, tp1_pct, tp2_pct, is_long, cutoff,
     if cutoff is not None:
         mask &= (pt <= cutoff)
     if entry_cond != "any":
-        breach = (ph > H) if is_long else (pl < L)         # reference boundary break
-        b_idx = int(np.argmax(breach)) if breach.any() else None
+        if breach_close:                                   # 3-min CLOSE breach
+            bt = rec.get("b3_hi_bt") if is_long else rec.get("b3_lo_bt")
+            b_idx = int(np.searchsorted(pt, bt)) if bt is not None else None
+            if b_idx is not None and b_idx >= len(pt):
+                b_idx = None                               # breach after square-off
+        else:
+            breach = (ph > H) if is_long else (pl < L)     # wick boundary break
+            b_idx = int(np.argmax(breach)) if breach.any() else None
         order = np.arange(len(ph))
         if entry_cond == "no_breach":
             if b_idx is not None:
@@ -300,7 +316,8 @@ def dir_allowed(rec, is_long, dir_filters):
     return True
 
 
-def sim_day(rec, cfg, entry_cond="any", dir_filters=None, vwap_exit=False):
+def sim_day(rec, cfg, entry_cond="any", dir_filters=None, vwap_exit=False,
+            breach_close=False):
     """All trades for one day under its weekday config (0, 1 or 2 directional trades)."""
     if not cfg.get("trade", True):
         return []
@@ -317,7 +334,8 @@ def sim_day(rec, cfg, entry_cond="any", dir_filters=None, vwap_exit=False):
         if not dir_allowed(rec, is_long, dir_filters):
             continue
         e, s, t1, t2 = dir_params(cfg, is_long)
-        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond, vwap_exit)
+        res = trade_pnl(rec, e, s, t1, t2, is_long, cutoff, entry_cond, vwap_exit,
+                        breach_close)
         if res is None:
             continue
         pnl, outcome, entry, risk, ext = res
@@ -339,7 +357,7 @@ def sim_day(rec, cfg, entry_cond="any", dir_filters=None, vwap_exit=False):
 
 
 def run(prepped: dict, configs: dict, entry_cond="any", dir_filters=None,
-        vwap_exit=False) -> pd.DataFrame:
+        vwap_exit=False, breach_close=False) -> pd.DataFrame:
     """Run the full day-wise strategy across all weekdays. Returns trades DataFrame."""
     rows = []
     for dow, day_list in prepped.items():
@@ -347,7 +365,8 @@ def run(prepped: dict, configs: dict, entry_cond="any", dir_filters=None,
         if not cfg:
             continue
         for rec in day_list:
-            rows.extend(sim_day(rec, cfg, entry_cond, dir_filters, vwap_exit))
+            rows.extend(sim_day(rec, cfg, entry_cond, dir_filters, vwap_exit,
+                                breach_close))
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
@@ -412,7 +431,8 @@ def monthly_table(trades: pd.DataFrame) -> pd.DataFrame:
 
 
 def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None,
-                     entry_cond="any", dir_filters=None, vwap_exit=False):
+                     entry_cond="any", dir_filters=None, vwap_exit=False,
+                     breach_close=False):
     """
     Sweep entry/stop/tp1/tp2 × direction for one weekday's days.
     `directions` is a subset of {"long","short"}. Returns a ranked DataFrame.
@@ -433,7 +453,7 @@ def optimize_weekday(day_list, directions, grid, metric, min_trades, cutoff=None
                             if not dir_allowed(rec, is_long, dir_filters):
                                 continue
                             res = trade_pnl(rec, entry, stop, tp1, tp2, is_long,
-                                            cutoff, entry_cond, vwap_exit)
+                                            cutoff, entry_cond, vwap_exit, breach_close)
                             if res is not None:
                                 pnls.append(res[0])
                                 dts.append(rec["date"])

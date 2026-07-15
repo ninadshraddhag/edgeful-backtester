@@ -116,12 +116,18 @@ def get_facts(instrument, mpath, mtime, open_t, close_t, ib_min=60):
 # ─── first-passage cache (the engine) ─────────────────────────────────────────
 
 @st.cache_data(show_spinner=True, max_entries=4)
-def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
+def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60,
+                  breach="wick"):
     """
     Per-day first-passage table: for a long-on-high-break and a short-on-low-break,
     the minute each target/stop level (× range) is first reached. This resolves
     target-vs-stop ordering exactly for ANY (target, stop) pair without re-simulating.
     Capped at the square-off (close_t) — nothing carries past it.
+
+    breach: "wick"  → the break triggers the instant price trades through the level.
+            "close" → the break only triggers when a 3-min candle CLOSES beyond it;
+                      days that merely wick are filtered out (no entry). Entry is
+                      still modeled at the level so the R-multiple math is unchanged.
     """
     mdf = load_min(mpath, mtime)               # 1-min execution
     meta = get_facts(instrument, mpath, mtime, open_t, close_t, ib_min).set_index("date")
@@ -141,13 +147,22 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
         close = sess.iloc[-1]["close"]          # close AT square-off
         ph, pl, pt = post["high"].values, post["low"].values, post["t_min"].values
 
+        # entry-trigger time per side (wick = high/low crosses; close = 3-min close crosses)
+        if breach == "close":
+            post3 = build_facts.to_timeframe(post, 3, open_t)
+            c3, t3 = post3["close"].values, post3["t_min"].values
+            lci = np.where(c3 > hi)[0]; et_long = t3[lci[0]] if len(lci) else None
+            sci = np.where(c3 < lo)[0]; et_short = t3[sci[0]] if len(sci) else None
+        else:
+            le = np.where(ph > hi)[0]; et_long = pt[le[0]] if len(le) else None
+            se = np.where(pl < lo)[0]; et_short = pt[se[0]] if len(se) else None
+
         rec = {"date": pd.Timestamp(day), "range": rng, "day_close": close,
                "win_hi": hi, "win_lo": lo}
 
-        # LONG: enter at hi when high first exceeds hi
-        le = np.where(ph > hi)[0]
-        if len(le):
-            et = pt[le[0]]
+        # LONG: enter at hi once the break is triggered
+        if et_long is not None:
+            et = et_long
             rec["L_entry"] = hi
             rec["L_entry_t"] = et
             for t in T_GRID:
@@ -160,10 +175,9 @@ def build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min=60):
             rec["L_entry"] = np.nan
             rec["L_entry_t"] = np.nan
 
-        # SHORT: enter at lo when low first breaks lo
-        se = np.where(pl < lo)[0]
-        if len(se):
-            et = pt[se[0]]
+        # SHORT: enter at lo once the break is triggered
+        if et_short is not None:
+            et = et_short
             rec["S_entry"] = lo
             rec["S_entry_t"] = et
             for t in T_GRID:
@@ -1074,6 +1088,11 @@ def daywise_mode():
                                  "moment the reference IB boundary breaks. Retest: entries "
                                  "only count after the boundary has broken first.")
         entry_cond = ENTRY_CONDS[ec_label]
+        breach_close = st.radio(
+            "Breach counts as", ["Wick (any touch)", "3-min close"], key="dw_breach",
+            help="Applies to the 'no breach' / 'after breakout' entry conditions: "
+                 "does the IB boundary break on a wick, or only when a 3-min candle "
+                 "CLOSES beyond it?").startswith("3-min")
 
         st.markdown("**🎯 IB directional filters** *(optional)*")
         fc_min = int(st.select_slider(
@@ -1193,7 +1212,8 @@ def daywise_mode():
         configs = _dw_read_config()
         presets["last"] = configs          # auto-persist most recent config
         _save_presets(presets)
-        trades = daywise.run(prepped, configs, entry_cond, dir_filters, vwap_exit)
+        trades = daywise.run(prepped, configs, entry_cond, dir_filters, vwap_exit,
+                             breach_close)
         with st.spinner("Building PDF report…"):
             try:
                 import report
@@ -1245,7 +1265,8 @@ def daywise_mode():
                     res = daywise.optimize_weekday(
                         prepped[opt_day], opt_dirs, daywise.OPT_GRID,
                         opt_metric, int(opt_min), entry_cond=entry_cond,
-                        dir_filters=dir_filters, vwap_exit=vwap_exit)
+                        dir_filters=dir_filters, vwap_exit=vwap_exit,
+                        breach_close=breach_close)
                 if not res.empty and int(opt_green) > 0:
                     res = res[res["green mo %"] >= int(opt_green)].reset_index(drop=True)
                 if res.empty:
@@ -1305,7 +1326,8 @@ def daywise_mode():
                     res = daywise.optimize_weekday(
                         prepped[day], co_dirs, daywise.OPT_GRID,
                         co_metric, int(co_min), entry_cond=entry_cond,
-                        dir_filters=dir_filters, vwap_exit=vwap_exit)
+                        dir_filters=dir_filters, vwap_exit=vwap_exit,
+                        breach_close=breach_close)
                     if not res.empty and int(co_green) > 0:
                         res = res[res["green mo %"] >= int(co_green)]
                     if not res.empty:
@@ -2640,6 +2662,11 @@ def ib50_mode():
             help="Prevents a single 1-min candle from both breaking the IB and filling "
                  "the retrace entry (an optimistic fill). Turning this OFF can roughly "
                  "double the backtest return — but that extra edge isn't tradeable.")
+        breach_use_close = st.radio(
+            "Breach counts as", ["Wick (any touch)", "3-min close"], key="ib50_breachtype",
+            horizontal=True,
+            help="For the breach gate: is the IB considered breached on a wick, or "
+                 "only when a 3-min candle CLOSES beyond it?").startswith("3-min")
 
     # ── entry / stop / target + risk ──────────────────────────────────────────
     st.subheader("Entry / Stop / Target  ·  Risk")
@@ -2688,6 +2715,7 @@ def ib50_mode():
         use_firstcandle=use_fc, firstcandle_min=int(fc_min),
         use_vwap=use_vwap, logic=logic,
         use_breach=use_breach, breach_mode=breach_mode, breach_scope=breach_scope,
+        breach_use_close=breach_use_close,
         entry_pct=float(entry_pct), sl_pct=float(sl_pct), target_pct=float(target_pct),
         risk_usd=float(risk_usd), point_value=float(point_value),
         use_entry_window=use_ew, entry_start_t=ews.hour * 60 + ews.minute,
@@ -3110,10 +3138,15 @@ def main():
         instrument, mpath, mtime, open_t, close_t, ib_min, (d0, d1) = data_sidebar("edge")
         setup = st.radio("Setup", [f"IB ({ib_min} min)", "ORB (15 min)"])
         tag = "ib" if setup.startswith("IB") else "orb"
+        breach = "close" if st.radio(
+            "Breach counts as", ["Wick (any touch)", "3-min close"], key="edge_breach",
+            help="Wick = the break triggers the instant price trades through the "
+                 "boundary. 3-min close = only when a 3-minute candle CLOSES beyond it "
+                 "(days that merely wick are skipped).").startswith("3-min") else "wick"
         st.markdown(EDGE_NOTE)
 
     with st.spinner(f"Indexing {instrument} {setup} (first run is cached)…"):
-        P = build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min)
+        P = build_passage(instrument, tag, mpath, mtime, open_t, close_t, ib_min, breach)
 
     P = P[(P["date"] >= pd.Timestamp(d0)) & (P["date"] <= pd.Timestamp(d1))].reset_index(drop=True)
     if P.empty:
