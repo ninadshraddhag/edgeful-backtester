@@ -772,7 +772,11 @@ def render():
                        file_name="prob_slice.csv", mime="text/csv")
 
     # ── day browser: chart every matching day with its levels ────────────────
-    _render_day_browser(sub, inst, session, tag, ib_min, bsuf)
+    # Gated behind a toggle — it loads the full minute-data file (millions of
+    # rows for XAUUSD/NQ), so we DON'T pay that cost on every page interaction.
+    if st.checkbox("🔍 Show day browser  (loads minute data — slower)",
+                   value=False, key=f"f_showbrowser_{inst}_{session}"):
+        _render_day_browser(sub, inst, session, tag, ib_min, bsuf)
 
 
 # ─── day browser ──────────────────────────────────────────────────────────────
