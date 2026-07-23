@@ -488,6 +488,53 @@ def render():
                    "after the LOW formed first is a stronger 'already-faded' signal than "
                    "just clearing the midpoint — the deeper the reversal close, the more "
                    "the first move is confirmed dead.")
+
+        # ── CONTINUATION — weak close → the first move continues ──────────────
+        st.markdown(f"#### {tag.upper()} continuation — weak close → the FIRST move CONTINUES")
+        cut = st.slider("Continuation close cut %  (0 = at low, 100 = at high)",
+                        15, 50, 50, 5, key=f"f_contcut_{tag}",
+                        help="LOW formed first + close BELOW this % → P(LOW breaks first). "
+                             "HIGH formed first + close ABOVE (100−this)% → P(HIGH breaks "
+                             "first). The opposite of the strong-close fade above.")
+        cutL, cutH = cut / 100.0, 1.0 - cut / 100.0
+        bcol = f"{tag}_break_first{bsuf}"
+        lf_w = lf[lf[loc_col] < cutL]       # low first + weak (low) close → expect low continues
+        hf_w = hf[hf[loc_col] > cutH]       # high first + strong (high) close → expect high continues
+        cp = st.columns(2)
+        with cp[0]:
+            if len(lf_w):
+                base = pct((lf[bcol] == "low").mean()) if len(lf) else "—"
+                cp[0].metric(f"LOW first + close <{cut}% → LOW breaks FIRST  (n={len(lf_w):,})",
+                             pct((lf_w[bcol] == "low").mean()),
+                             f"vs {base} base for all low-first days")
+                lb = lf_w[lf_w[bcol] == "low"]
+                de = lb[f"{tag}_dn_ext"].dropna(); dr = lb[f"{tag}_dn_retr"].dropna()
+                cp[0].caption(
+                    f"On those low-break days — down-ext ≥0.5×: "
+                    f"{pct((de>=0.5).mean()) if len(de) else '—'} · ≥1.0×: "
+                    f"{pct((de>=1.0).mean()) if len(de) else '—'}  |  bounce ≥0.5×: "
+                    f"{pct((dr>=0.5).mean()) if len(dr) else '—'}  (n={len(lb):,})")
+            else:
+                st.info(f"No days: low first + close <{cut}% of range.")
+        with cp[1]:
+            if len(hf_w):
+                base = pct((hf[bcol] == "high").mean()) if len(hf) else "—"
+                cp[1].metric(f"HIGH first + close >{100-cut}% → HIGH breaks FIRST  (n={len(hf_w):,})",
+                             pct((hf_w[bcol] == "high").mean()),
+                             f"vs {base} base for all high-first days")
+                hbk = hf_w[hf_w[bcol] == "high"]
+                ue = hbk[f"{tag}_up_ext"].dropna(); ur = hbk[f"{tag}_up_retr"].dropna()
+                cp[1].caption(
+                    f"On those high-break days — up-ext ≥0.5×: "
+                    f"{pct((ue>=0.5).mean()) if len(ue) else '—'} · ≥1.0×: "
+                    f"{pct((ue>=1.0).mean()) if len(ue) else '—'}  |  pullback ≥0.5×: "
+                    f"{pct((ur>=0.5).mean()) if len(ur) else '—'}  (n={len(hbk):,})")
+            else:
+                st.info(f"No days: high first + close >{100-cut}% of range.")
+        st.caption("When the first move forms and the window CLOSES back on that SAME "
+                   "side (a weak/failed reversal), the first move tends to CONTINUE — the "
+                   "mirror of the strong-close fade above. The extension figures show how "
+                   "far the continuation runs, and the retracement how much it pulls back.")
     else:
         st.info("Rebuild the facts table to enable the close-location (75%) stat.")
 
