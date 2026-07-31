@@ -1901,8 +1901,11 @@ def _live_render(instrument, feat, probs, open_t):
 
 # ═══════════════════════ IB50 — IB Retracement strategy (Pine port) ═══════════
 
-@st.cache_data(show_spinner=False, max_entries=1)
+@st.cache_data(show_spinner=False, max_entries=6)
 def prep_ib50(instrument, mpath, mtime, open_t, close_t, ib_min):
+    # max_entries=6: the Confluence tab preps several IB durations (e.g. 15/30/50/60)
+    # in one render — with a single slot they evicted each other and re-prepped
+    # (~2s each) on every widget click. 6 covers the usual multi-duration stacks.
     return ib50.prep_days(load_min(mpath, mtime), open_t, close_t, ib_min)
 
 

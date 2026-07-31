@@ -52,10 +52,13 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
     ib_end = open_t + ib_min - 1
     min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
     has_vol = "volume" in min_df.columns
+    # sort ONCE by the full timestamp so every day's rows are already time-ordered
+    # → drop the per-day sort_values (was ~part of the prep hot path, ×764 days).
+    min_df = min_df.sort_values("date", kind="stable")
     out = []
     for day, g0 in min_df.groupby("date_only", sort=True):
         dow = pd.Timestamp(day).day_name()
-        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
+        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)]
         win = sess[sess["t_min"] <= ib_end]
         post = sess[sess["t_min"] > ib_end]
         if len(win) < min_bars or post.empty:
@@ -74,12 +77,17 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
         # first-session-candle direction (15/30/60-min): close of the first N-min
         # candle vs the session open. Up = bullish vote, down = bearish (a static
         # per-day directional vote like formation).
-        day_open = float(sess.iloc[0]["open"])
+        st_min = sess["t_min"].to_numpy()
+        sclose = sess["close"].to_numpy(float)
+        day_open = float(sess["open"].to_numpy(float)[0])
         fc = {}
         for n in (15, 30, 60):
-            cser = sess.loc[sess["t_min"] == open_t + n - 1, "close"]
-            fc[n] = (0 if cser.empty else
-                     (1 if cser.iloc[0] > day_open else (-1 if cser.iloc[0] < day_open else 0)))
+            j = int(np.searchsorted(st_min, open_t + n - 1))
+            if j < len(st_min) and st_min[j] == open_t + n - 1:
+                c = sclose[j]
+                fc[n] = 1 if c > day_open else (-1 if c < day_open else 0)
+            else:
+                fc[n] = 0
 
         # session VWAP anchored at the session open (whole session, then sliced)
         src = (sess["high"] + sess["low"] + sess["close"]) / 3.0
@@ -103,8 +111,19 @@ def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
         # 3-min-CLOSE breach state: True from the bar at/after a 3-min candle
         # first CLOSES beyond the IB (stricter than the wick states above)
         pt_arr = post["t_min"].to_numpy(float)
-        post3 = build_facts.to_timeframe(post, 3, open_t)
-        _c3, _t3 = post3["close"].to_numpy(), post3["t_min"].to_numpy()
+        # vectorized 3-min resample for ONE already-sorted day: a 3-min bucket's
+        # CLOSE is its last 1-min close, its t_min is the bucket's OPEN minute
+        # (identical to build_facts.to_timeframe). Done directly on the arrays to
+        # avoid a per-day 2-key sorted groupby — that call, ×764 days, was ~15s of
+        # the prep and the whole reason the app felt slow.
+        pc_arr = post["close"].to_numpy(float)
+        buck = ((pt_arr - open_t) // 3).astype(np.int64)
+        first = np.empty(len(buck), bool)
+        first[0] = True
+        first[1:] = buck[1:] != buck[:-1]
+        first_idx = np.where(first)[0]
+        last_idx = np.append(first_idx[1:], len(buck)) - 1
+        _c3, _t3 = pc_arr[last_idx], pt_arr[first_idx]
         _hi = np.where(_c3 > H)[0]; _lo = np.where(_c3 < L)[0]
         hb_c = (pt_arr >= _t3[_hi[0]]) if len(_hi) else np.zeros(len(pt_arr), bool)
         lb_c = (pt_arr >= _t3[_lo[0]]) if len(_lo) else np.zeros(len(pt_arr), bool)

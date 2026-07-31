@@ -63,13 +63,16 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
     """
     ib_end = open_t + ib_min - 1
     min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
+    # sort ONCE by the full timestamp so every day's rows are time-ordered → the
+    # per-day sort_values below becomes unnecessary (was part of the prep hot path).
+    min_df = min_df.sort_values("date", kind="stable")
     out = {d: [] for d in WEEKDAYS}
     for day, g0 in min_df.groupby("date_only", sort=True):
         dow = pd.Timestamp(day).day_name()
         if dow not in out:
             continue
         # session window only → enforces the square-off
-        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)].sort_values("t_min")
+        sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)]
         win  = sess[sess["t_min"] <= ib_end]
         post = sess[sess["t_min"] > ib_end]
         if len(win) < min_bars or post.empty:
@@ -101,8 +104,18 @@ def prep_days(min_df: pd.DataFrame, open_t=DEFAULT_OPEN_T, close_t=DEFAULT_CLOSE
 
         # 3-min-CLOSE breach times (for the optional close-breach entry gate):
         # minute of the first 3-min post-IB candle that CLOSES beyond H / L.
-        post3 = build_facts.to_timeframe(post, 3, open_t)
-        _c3, _t3 = post3["close"].to_numpy(), post3["t_min"].to_numpy()
+        # vectorized 3-min resample for ONE sorted day (bucket CLOSE = last 1-min
+        # close, t_min = bucket OPEN minute — matches build_facts.to_timeframe),
+        # avoiding a per-day 2-key groupby (the old prep hot path).
+        pt3 = post["t_min"].to_numpy(float)
+        pc3 = post["close"].to_numpy(float)
+        buck = ((pt3 - open_t) // 3).astype(np.int64)
+        fr = np.empty(len(buck), bool)
+        fr[0] = True
+        fr[1:] = buck[1:] != buck[:-1]
+        fi = np.where(fr)[0]
+        li = np.append(fi[1:], len(buck)) - 1
+        _c3, _t3 = pc3[li], pt3[fi]
         _hi = np.where(_c3 > H)[0]; _lo = np.where(_c3 < L)[0]
         b3_hi_bt = float(_t3[_hi[0]]) if len(_hi) else None
         b3_lo_bt = float(_t3[_lo[0]]) if len(_lo) else None

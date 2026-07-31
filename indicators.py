@@ -230,17 +230,25 @@ def vwap5_steps(sess: pd.DataFrame, open_t: int, tf: int = 5):
     n = len(t)
     if n == 0:
         return np.zeros(0), np.zeros(0, dtype=bool)
-    b = (t - open_t) // tf
-    typ = ((sess["high"] + sess["low"] + sess["close"]) / 3.0).to_numpy()
+    typ = ((sess["high"] + sess["low"] + sess["close"]) / 3.0).to_numpy(float)
     if "volume" in sess.columns:
-        v = pd.to_numeric(sess["volume"], errors="coerce").fillna(0.0).to_numpy()
+        v = pd.to_numeric(sess["volume"], errors="coerce").fillna(0.0).to_numpy(float)
         if v.sum() <= 0:
             v = np.ones(n)
     else:
         v = np.ones(n)
-    agg = pd.DataFrame({"b": b, "tv": typ * v, "v": v}).groupby("b", sort=True)
-    bucket_vwap = agg["tv"].sum().cumsum() / agg["v"].sum().cumsum()
-    pv5 = bucket_vwap.reindex(b).to_numpy()
+    # cumulative tf-min-bucket VWAP without a per-day groupby: t is sorted so the
+    # bucket id is non-decreasing → sum per distinct bucket with reduceat, take a
+    # running cumsum, then scatter back to each 1-min row by its bucket ordinal.
+    b = ((t - open_t) // tf)
+    first = np.empty(n, dtype=bool)
+    first[0] = True
+    first[1:] = b[1:] != b[:-1]
+    starts = np.where(first)[0]
+    tv_sum = np.add.reduceat(typ * v, starts)
+    v_sum = np.add.reduceat(v, starts)
+    cvw = np.cumsum(tv_sum) / np.cumsum(v_sum)
+    pv5 = cvw[np.cumsum(first) - 1]
     # a tf-min close is the last minute of a complete bucket on the grid anchored
     # at open_t — deterministic, so a partial bucket at the session end is NOT a
     # tf-min close (the engine's square-off handles that final bar instead)
