@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -39,8 +40,22 @@ ACTION_COSTS = {              # credits per metered action (default 1)
 
 # ─── backend selection ────────────────────────────────────────────────────────
 
+_SB_COOLDOWN = 60.0        # after a connection failure, skip Supabase for this many
+_sb_down_until = 0.0       # seconds and serve from the local store (fast degrade)
+
+
+def _note_sb_down():
+    """Record that Supabase just failed so `_sb()` short-circuits to the local
+    store for a cooldown window — one caller eats the timeout, not every one."""
+    global _sb_down_until
+    _sb_down_until = time.time() + _SB_COOLDOWN
+
+
 def _sb():
-    """(url, service_key) when Supabase is configured, else None."""
+    """(url, service_key) when Supabase is configured AND not in a post-failure
+    cooldown, else None (→ local-store fallback)."""
+    if time.time() < _sb_down_until:
+        return None
     try:
         s = st.secrets["supabase"]
         url, key = s["url"].rstrip("/"), s["service_key"]
@@ -87,23 +102,26 @@ def ensure_user(email: str) -> dict:
     email = email.strip().lower()
     sb = _sb()
     if sb:
-        url, key = sb
-        r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
-                         params={"email": f"eq.{email}", "select": "*"}, timeout=10)
-        rows = r.json() if r.ok else []
-        if rows:
-            return rows[0]
-        row = {"email": email, "credits": STARTER_CREDITS,
-               "is_admin": email in ADMIN_EMAILS}
-        r = requests.post(f"{url}/rest/v1/users", headers=_hdrs(key),
-                          json=row, timeout=10)
-        if r.ok and r.json():
-            return r.json()[0]
-        # lost a provisioning race — re-read
-        r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
-                         params={"email": f"eq.{email}", "select": "*"}, timeout=10)
-        rows = r.json() if r.ok else []
-        return rows[0] if rows else {"email": email, "credits": 0}
+        try:
+            url, key = sb
+            r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
+                             params={"email": f"eq.{email}", "select": "*"}, timeout=10)
+            rows = r.json() if r.ok else []
+            if rows:
+                return rows[0]
+            row = {"email": email, "credits": STARTER_CREDITS,
+                   "is_admin": email in ADMIN_EMAILS}
+            r = requests.post(f"{url}/rest/v1/users", headers=_hdrs(key),
+                              json=row, timeout=10)
+            if r.ok and r.json():
+                return r.json()[0]
+            # lost a provisioning race — re-read
+            r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
+                             params={"email": f"eq.{email}", "select": "*"}, timeout=10)
+            rows = r.json() if r.ok else []
+            return rows[0] if rows else {"email": email, "credits": 0}
+        except requests.exceptions.RequestException:
+            _note_sb_down()   # Supabase configured but unreachable → local fallback
     with _LOCK:
         d = _local_load()
         u = d["users"].get(email)
@@ -145,12 +163,16 @@ def signup(email: str, name: str) -> dict:
     existed = False
     sb = _sb()
     if sb:
-        url, key = sb
-        r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
-                         params={"email": f"eq.{email}", "select": "email"},
-                         timeout=10)
-        existed = bool(r.ok and r.json())
-    else:
+        try:
+            url, key = sb
+            r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
+                             params={"email": f"eq.{email}", "select": "email"},
+                             timeout=10)
+            existed = bool(r.ok and r.json())
+        except requests.exceptions.RequestException:
+            _note_sb_down()
+            sb = None   # Supabase unreachable → treat this signup as local
+    if not sb:
         existed = email in _local_load()["users"]
     user = ensure_user(email)
     try:
@@ -183,14 +205,17 @@ def charge(email: str, action: str, n: int | None = None) -> tuple[bool, int]:
         return True, balance(email)
     sb = _sb()
     if sb:
-        url, key = sb
-        r = requests.post(f"{url}/rest/v1/rpc/charge_credits", headers=_hdrs(key),
-                          json={"p_email": email, "p_n": n, "p_action": action},
-                          timeout=10)
-        if not r.ok:
-            return False, -1
-        nb = int(r.json())
-        return (nb >= 0), max(nb, 0)
+        try:
+            url, key = sb
+            r = requests.post(f"{url}/rest/v1/rpc/charge_credits", headers=_hdrs(key),
+                              json={"p_email": email, "p_n": n, "p_action": action},
+                              timeout=10)
+            if not r.ok:
+                return False, -1
+            nb = int(r.json())
+            return (nb >= 0), max(nb, 0)
+        except requests.exceptions.RequestException:
+            _note_sb_down()   # Supabase unreachable → local fallback below
     with _LOCK:
         d = _local_load()
         u = d["users"].setdefault(email, {"email": email, "credits": 0,
@@ -210,10 +235,13 @@ def add_credits(email: str, n: int) -> int:
     email = email.strip().lower()
     sb = _sb()
     if sb:
-        url, key = sb
-        r = requests.post(f"{url}/rest/v1/rpc/add_credits", headers=_hdrs(key),
-                          json={"p_email": email, "p_n": int(n)}, timeout=10)
-        return int(r.json()) if r.ok else -1
+        try:
+            url, key = sb
+            r = requests.post(f"{url}/rest/v1/rpc/add_credits", headers=_hdrs(key),
+                              json={"p_email": email, "p_n": int(n)}, timeout=10)
+            return int(r.json()) if r.ok else -1
+        except requests.exceptions.RequestException:
+            _note_sb_down()   # Supabase unreachable → local fallback below
     with _LOCK:
         d = _local_load()
         u = d["users"].setdefault(email, {"email": email, "credits": 0, "total_used": 0})
@@ -229,11 +257,14 @@ def set_flag(email: str, field: str, value) -> None:
     email = email.strip().lower()
     sb = _sb()
     if sb:
-        url, key = sb
-        requests.patch(f"{url}/rest/v1/users", headers=_hdrs(key),
-                       params={"email": f"eq.{email}"},
-                       json={field: value}, timeout=10)
-        return
+        try:
+            url, key = sb
+            requests.patch(f"{url}/rest/v1/users", headers=_hdrs(key),
+                           params={"email": f"eq.{email}"},
+                           json={field: value}, timeout=10)
+            return
+        except requests.exceptions.RequestException:
+            _note_sb_down()   # Supabase unreachable → local fallback below
     with _LOCK:
         d = _local_load()
         if email in d["users"]:
@@ -244,22 +275,28 @@ def set_flag(email: str, field: str, value) -> None:
 def list_users() -> list[dict]:
     sb = _sb()
     if sb:
-        url, key = sb
-        r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
-                         params={"select": "*", "order": "last_seen.desc",
-                                 "limit": "1000"}, timeout=15)
-        return r.json() if r.ok else []
+        try:
+            url, key = sb
+            r = requests.get(f"{url}/rest/v1/users", headers=_hdrs(key),
+                             params={"select": "*", "order": "last_seen.desc",
+                                     "limit": "1000"}, timeout=15)
+            return r.json() if r.ok else []
+        except requests.exceptions.RequestException:
+            _note_sb_down()   # Supabase unreachable → local fallback below
     return list(_local_load()["users"].values())
 
 
 def usage_log(limit: int = 500) -> list[dict]:
     sb = _sb()
     if sb:
-        url, key = sb
-        r = requests.get(f"{url}/rest/v1/usage_log", headers=_hdrs(key),
-                         params={"select": "*", "order": "ts.desc",
-                                 "limit": str(limit)}, timeout=15)
-        return r.json() if r.ok else []
+        try:
+            url, key = sb
+            r = requests.get(f"{url}/rest/v1/usage_log", headers=_hdrs(key),
+                             params={"select": "*", "order": "ts.desc",
+                                     "limit": str(limit)}, timeout=15)
+            return r.json() if r.ok else []
+        except requests.exceptions.RequestException:
+            _note_sb_down()   # Supabase unreachable → local fallback below
     return list(reversed(_local_load()["log"][-limit:]))
 
 

@@ -40,41 +40,56 @@ VWAP_EXIT_TF = 5    # the VWAP-close exit is evaluated on this timeframe (vote/e
 
 # ─── per-day preparation ──────────────────────────────────────────────────────
 
-def prep_sessions(min_df: pd.DataFrame, open_t: int, close_t: int) -> list:
+def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
+              tf: int = 1) -> list:
     """
-    Heavy, IB-duration-INDEPENDENT per-day prep: everything that depends only on
-    (open_t, close_t) — the full-session arrays, the session VWAP (anchored at the
-    open), the 5-min VWAP steps, and the first-candle votes. Cache this once and
-    every IB-duration change is then near-free (see `days_from_sessions`).
+    Build per-day records from a cleaned minute frame. Session VWAP is anchored
+    at the session open (open_t) per day — the Pine `cumPV` reset at ibStart.
+
+    Each record carries the IB statics plus post-IB arrays (bars after the IB,
+    within the trading/square-off window): t_min, high, low, close, vwap.
     """
+    ib_end = open_t + ib_min - 1
+    min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
     has_vol = "volume" in min_df.columns
     # sort ONCE by the full timestamp so every day's rows are already time-ordered
     # → drop the per-day sort_values (was ~part of the prep hot path, ×764 days).
     min_df = min_df.sort_values("date", kind="stable")
-    sessions = []
+    out = []
     for day, g0 in min_df.groupby("date_only", sort=True):
+        dow = pd.Timestamp(day).day_name()
         sess = g0[(g0["t_min"] >= open_t) & (g0["t_min"] <= close_t)]
-        if len(sess) == 0:
+        win = sess[sess["t_min"] <= ib_end]
+        post = sess[sess["t_min"] > ib_end]
+        if len(win) < min_bars or post.empty:
             continue
-        st = sess["t_min"].to_numpy(float)
-        sh = sess["high"].to_numpy(float)
-        sl = sess["low"].to_numpy(float)
-        sc = sess["close"].to_numpy(float)
-        day_open = float(sess["open"].to_numpy(float)[0])
+        H = float(win["high"].max())
+        L = float(win["low"].min())
+        rng = H - L
+        if rng <= 0:
+            continue
+        # which extreme formed first inside the IB (by minute)
+        t_hi = win.loc[win["high"] >= H, "t_min"].min()
+        t_lo = win.loc[win["low"] <= L, "t_min"].min()
+        first_side = 1 if t_lo < t_hi else (-1 if t_hi < t_lo else 1)
+        ib_close = float(win.iloc[-1]["close"])
 
         # first-session-candle direction (15/30/60-min): close of the first N-min
-        # candle vs the session open. Up = bullish vote, down = bearish.
+        # candle vs the session open. Up = bullish vote, down = bearish (a static
+        # per-day directional vote like formation).
+        st_min = sess["t_min"].to_numpy()
+        sclose = sess["close"].to_numpy(float)
+        day_open = float(sess["open"].to_numpy(float)[0])
         fc = {}
         for n in (15, 30, 60):
-            j = int(np.searchsorted(st, open_t + n - 1))
-            if j < len(st) and st[j] == open_t + n - 1:
-                fc[n] = 1 if sc[j] > day_open else (-1 if sc[j] < day_open else 0)
+            j = int(np.searchsorted(st_min, open_t + n - 1))
+            if j < len(st_min) and st_min[j] == open_t + n - 1:
+                c = sclose[j]
+                fc[n] = 1 if c > day_open else (-1 if c < day_open else 0)
             else:
                 fc[n] = 0
 
-        # session VWAP anchored at the session open (whole session; sliced per-IB
-        # later). Kept as the original pandas expression so `pv` stays bit-identical
-        # — this layer is cached and runs once, so the dtype path must not drift.
+        # session VWAP anchored at the session open (whole session, then sliced)
         src = (sess["high"] + sess["low"] + sess["close"]) / 3.0
         if has_vol:
             vol = pd.to_numeric(sess["volume"], errors="coerce").fillna(0.0)
@@ -84,54 +99,24 @@ def prep_sessions(min_df: pd.DataFrame, open_t: int, close_t: int) -> list:
                 vwap = src.expanding().mean()
         else:
             vwap = src.expanding().mean()
-        sv = vwap.to_numpy(float)
-
-        pv5_full, is5_full = ind.vwap5_steps(sess, open_t, VWAP_EXIT_TF)
-
-        sessions.append({
-            "date": pd.Timestamp(day), "dow": pd.Timestamp(day).day_name(),
-            "day_open": day_open, "fc15": int(fc[15]), "fc30": int(fc[30]), "fc60": int(fc[60]),
-            "st": st, "sh": sh, "sl": sl, "sc": sc, "sv": sv,
-            "pv5f": pv5_full, "is5f": is5_full,
-        })
-    return sessions
-
-
-def days_from_sessions(sessions: list, open_t: int, ib_min: int, tf: int = 1) -> list:
-    """
-    Cheap, IB-duration-DEPENDENT layer: split each cached session at the IB window
-    and build the per-day trade record. This is the only part that must re-run when
-    the IB duration changes (~0.02s vs ~2.4s for the full session prep).
-    """
-    ib_end = open_t + ib_min - 1
-    min_bars = min(20, max(3, int(ib_min / max(tf, 1) * 0.66)))
-    out = []
-    for s in sessions:
-        st, sh, sl, sc, sv = s["st"], s["sh"], s["sl"], s["sc"], s["sv"]
-        wlen = int(np.searchsorted(st, ib_end, side="right"))  # rows with t_min <= ib_end
-        if wlen < min_bars or (len(st) - wlen) == 0:           # too-short IB, or no post bars
-            continue
-        H = float(sh[:wlen].max())
-        L = float(sl[:wlen].min())
-        rng = H - L
-        if rng <= 0:
-            continue
-        # which extreme formed first inside the IB (first minute each is touched)
-        t_hi = st[int(np.argmax(sh[:wlen] >= H))]
-        t_lo = st[int(np.argmax(sl[:wlen] <= L))]
-        first_side = 1 if t_lo < t_hi else (-1 if t_hi < t_lo else 1)
-        ib_close = float(sc[wlen - 1])
-
-        # post-IB arrays are just slices of the cached session arrays
-        pt_arr = st[wlen:]
-        ph_arr = sh[wlen:]
-        pl_arr = sl[wlen:]
-        pc_arr = sc[wlen:]
-        hb = np.maximum.accumulate(ph_arr > H).astype(bool)
-        lb = np.maximum.accumulate(pl_arr < L).astype(bool)
-        # 3-min-CLOSE breach state: True from the bar at/after a 3-min candle first
-        # CLOSES beyond the IB (bucket close = last 1-min close, t_min = bucket open;
-        # identical to build_facts.to_timeframe, but with no per-day groupby).
+        post_mask = sess["t_min"] > ib_end
+        ph_arr = post["high"].to_numpy(float)
+        pl_arr = post["low"].to_numpy(float)
+        # cumulative breach state (config-independent → precompute once): True at
+        # bar i once the IB high/low has been pierced by bar i (inclusive)
+        hb = (np.maximum.accumulate(ph_arr > H).astype(bool) if len(ph_arr)
+              else np.zeros(0, dtype=bool))
+        lb = (np.maximum.accumulate(pl_arr < L).astype(bool) if len(pl_arr)
+              else np.zeros(0, dtype=bool))
+        # 3-min-CLOSE breach state: True from the bar at/after a 3-min candle
+        # first CLOSES beyond the IB (stricter than the wick states above)
+        pt_arr = post["t_min"].to_numpy(float)
+        # vectorized 3-min resample for ONE already-sorted day: a 3-min bucket's
+        # CLOSE is its last 1-min close, its t_min is the bucket's OPEN minute
+        # (identical to build_facts.to_timeframe). Done directly on the arrays to
+        # avoid a per-day 2-key sorted groupby — that call, ×764 days, was ~15s of
+        # the prep and the whole reason the app felt slow.
+        pc_arr = post["close"].to_numpy(float)
         buck = ((pt_arr - open_t) // 3).astype(np.int64)
         first = np.empty(len(buck), bool)
         first[0] = True
@@ -143,25 +128,25 @@ def days_from_sessions(sessions: list, open_t: int, ib_min: int, tf: int = 1) ->
         hb_c = (pt_arr >= _t3[_hi[0]]) if len(_hi) else np.zeros(len(pt_arr), bool)
         lb_c = (pt_arr >= _t3[_lo[0]]) if len(_lo) else np.zeros(len(pt_arr), bool)
 
+        # 5-min VWAP step + 5-min-close marker for the VWAP-close EXIT (the
+        # direction VOTE keeps the 1-min VWAP `pv`; entries/SL/TP stay 1-min)
+        pv5_full, is5_full = ind.vwap5_steps(sess, open_t, VWAP_EXIT_TF)
+        pm = post_mask.to_numpy()
+
         out.append({
-            "date": s["date"], "dow": s["dow"],
+            "date": pd.Timestamp(day), "dow": dow,
             "ib_high": H, "ib_low": L, "ib_range": rng, "ib_close": ib_close,
-            "first_side": int(first_side), "day_open": s["day_open"],
-            "fc15": s["fc15"], "fc30": s["fc30"], "fc60": s["fc60"],
-            "pt": pt_arr, "ph": ph_arr, "pl": pl_arr, "pc": pc_arr,
-            "pv": sv[wlen:],                            # 1-min VWAP (direction vote)
-            "pv5": s["pv5f"][wlen:], "is5": s["is5f"][wlen:],  # 5-min VWAP (exit only)
+            "first_side": int(first_side), "day_open": day_open,
+            "fc15": int(fc[15]), "fc30": int(fc[30]), "fc60": int(fc[60]),
+            "pt": post["t_min"].to_numpy(float),
+            "ph": ph_arr, "pl": pl_arr,
+            "pc": post["close"].to_numpy(float),
+            "pv": vwap[post_mask].to_numpy(float),     # 1-min VWAP (direction vote)
+            "pv5": pv5_full[pm], "is5": is5_full[pm],  # 5-min VWAP (exit only)
             "hb": hb, "lb": lb,
             "hb_c": hb_c, "lb_c": lb_c,                 # 3-min-close breach state
         })
     return out
-
-
-def prep_days(min_df: pd.DataFrame, open_t: int, close_t: int, ib_min: int,
-              tf: int = 1) -> list:
-    """Convenience wrapper (headless callers): full prep in one shot. The app caches
-    the two layers separately so IB-duration changes only re-run the cheap layer."""
-    return days_from_sessions(prep_sessions(min_df, open_t, close_t), open_t, ib_min, tf)
 
 
 # ─── direction bias + breach gate (Pine semantics) ────────────────────────────
