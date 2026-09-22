@@ -173,7 +173,39 @@ def _trade_browser(days, port, cfg):
         st.plotly_chart(f2, use_container_width=True)
 
 
+def _apply_cfg_to_state(cfg):
+    """Push a saved/optimized cfg into the widget session_state. MUST run before
+    the widgets are created (top of render)."""
+    s = st.session_state
+    s["opt_iv"] = round(float(cfg.get("iv", 0.13)) * 100, 2)
+    s["opt_lots"] = int(cfg.get("lots", 1))
+    s["opt_slip"] = float(cfg.get("slippage_pts", 0.5))
+    s["opt_stress_cost"] = float(cfg.get("cost_mult", 1.0)) > 1.0
+    s["opt_stress_slip"] = float(cfg.get("slip_mult", 1.0)) > 1.0
+    _MAP = {
+        "T1": [("on", "opt_T1_on"), ("ema_gap_pct", "opt_T1_ema"), ("stop_pct", "opt_T1_stop"),
+               ("trail_pct", "opt_T1_trail"), ("cutoff", "opt_T1_cut"), ("use_vwap", "opt_T1_vwap")],
+        "GF": [("on", "opt_GF_on"), ("gap_min", "opt_GF_gmin"), ("gap_max", "opt_GF_gmax"),
+               ("target_buf_pct", "opt_GF_buf"), ("stop_pct", "opt_GF_stop")],
+        "ORB": [("on", "opt_ORB_on"), ("stop_cap_pct", "opt_ORB_cap"), ("trail_pct", "opt_ORB_trail"),
+                ("cutoff", "opt_ORB_cut"), ("use_vwap", "opt_ORB_vwap")],
+    }
+    for leg, pairs in _MAP.items():
+        lc = cfg.get(leg, {})
+        for src, key in pairs:
+            if src not in lc:
+                continue
+            if src in ("on", "use_vwap"):
+                s[key] = bool(lc[src])
+            elif src == "cutoff":
+                s[key] = int(lc[src]) // 60
+            else:
+                s[key] = float(lc[src])
+
+
 def render():
+    if "_opt_pending_cfg" in st.session_state:
+        _apply_cfg_to_state(st.session_state.pop("_opt_pending_cfg"))
     st.title("🎯 NIFTY Option Strategy")
     st.caption("Three diversified intraday legs · long the ATM option (pure option "
                "buying) · 1 lot · flat 15:15 · stops in % of PDC. Pick **Synthetic "
@@ -216,6 +248,29 @@ def render():
         if "Test" in split:
             st.warning("🔒 TEST 2025–26 is your reserved hold-out. Every look "
                        "burns it. Use only for a final one-shot check.")
+
+        with st.expander("💾 Save / load settings"):
+            presets = ostr.load_presets()
+            if presets:
+                psel = st.selectbox("Saved presets", list(presets), key="opt_preset_sel")
+                pc = st.columns(2)
+                if pc[0].button("📂 Load", key="opt_preset_load"):
+                    st.session_state["_opt_pending_cfg"] = presets[psel]
+                    st.rerun()
+                if pc[1].button("🗑 Delete", key="opt_preset_del"):
+                    ostr.delete_preset(psel)
+                    st.rerun()
+            else:
+                st.caption("No saved presets yet — tune the legs and save below.")
+            nm = st.text_input("Save current settings as…", key="opt_preset_name",
+                               placeholder="e.g. Optimized real 2024")
+            if st.button("💾 Save", key="opt_preset_save"):
+                if nm.strip():
+                    ostr.save_preset(nm.strip(), _cfg_from_state())
+                    st.success(f"Saved “{nm.strip()}”.")
+                    st.rerun()
+                else:
+                    st.error("Enter a name first.")
 
     # ── leg config ─────────────────────────────────────────────────────────────
     st.subheader("Legs")
@@ -305,37 +360,73 @@ def render():
                                file_name=f"option_strategy_{instrument.replace(' ','_')}.csv",
                                mime="text/csv")
 
-    # ── per-leg optimizer ──────────────────────────────────────────────────────
+    # ── optimizer (single leg or all three at once) ─────────────────────────────
     st.divider()
-    with st.expander("🔬 Per-leg optimizer — sweep one leg's parameters"):
+    with st.expander("🔬 Optimizer — sweep leg parameters (single leg or all three)"):
+        scope = st.radio("Scope", ["All 3 legs", "Single leg"], horizontal=True,
+                         key="opt_opt_scope")
         oc = st.columns(5)
-        oleg = oc[0].selectbox("Leg", ostr.LEGS, format_func=lambda l: LEG_NAMES[l],
-                               key="opt_opt_leg")
+        if scope == "Single leg":
+            oleg = oc[0].selectbox("Leg", ostr.LEGS, format_func=lambda l: LEG_NAMES[l],
+                                   key="opt_opt_leg")
+        else:
+            oleg = None
+            oc[0].caption("Optimizes **T1 + GF + ORB** — best config per leg, combined.")
         orank = oc[1].selectbox("Rank by", ["exp", "pf", "green_months", "sharpe", "net"],
                                 key="opt_opt_rank")
         omin = oc[2].number_input("Min trades", 20, 3000, 100, 10, key="opt_opt_min")
         ogreen = oc[3].number_input("Min green months %", 0, 100, 0, 5, key="opt_opt_green")
-        st.caption(f"Sweeps {LEG_NAMES[oleg]} over {oleg}'s grid on the selected period "
-                   f"({split_name if res else st.session_state['opt_split']}), using the "
-                   "current cost settings.")
+        st.caption("Sweeps on the selected period "
+                   f"({split_name if res else st.session_state['opt_split']}) using the "
+                   "current cost & pricing settings.")
         if oc[4].button("🔎 Optimize", key="opt_opt_run"):
             import credits
             if credits.try_charge("ib50_optimizer"):
                 cfg = _cfg_from_state()
                 prog = st.progress(0.0, text="Sweeping…")
-                rdf = ostr.optimize_leg(days, cfg, oleg, rank=orank,
-                                        min_trades=int(omin), min_green=int(ogreen),
-                                        progress=lambda k, n: prog.progress(k / n,
-                                                 text=f"{k}/{n} configs…"))
+                pfn = lambda k, n: prog.progress(min(k / n, 1.0), text=f"{k}/{n} configs…")
+                if scope == "Single leg":
+                    rdf = ostr.optimize_leg(days, cfg, oleg, rank=orank,
+                                            min_trades=int(omin), min_green=int(ogreen), progress=pfn)
+                    st.session_state["opt_opt_res"] = ("single", oleg, rdf)
+                else:
+                    ar = ostr.optimize_all(days, cfg, rank=orank,
+                                           min_trades=int(omin), min_green=int(ogreen), progress=pfn)
+                    ar["port_metrics"] = (ostr.metrics(ostr.run_portfolio(days, ar["cfg"])["ALL"])
+                                          if ar["best"] else None)
+                    st.session_state["opt_opt_res"] = ("all", None, ar)
                 prog.empty()
-                st.session_state["opt_opt_res"] = (oleg, rdf)
+
         r = st.session_state.get("opt_opt_res")
-        if r and not r[1].empty:
-            st.markdown(f"**Top configs — {LEG_NAMES[r[0]]}** (all shown, so you can "
-                        "check for parameter cliffs)")
-            st.dataframe(r[1], use_container_width=True, hide_index=True)
-        elif r:
-            st.warning("No config met the min-trades / min-green thresholds.")
+        if r and r[0] == "single":
+            _, ol, rdf = r
+            if len(rdf):
+                st.markdown(f"**Top configs — {LEG_NAMES[ol]}** (all shown, so you can "
+                            "check for parameter cliffs)")
+                st.dataframe(rdf, use_container_width=True, hide_index=True)
+                if st.button("✅ Apply best to inputs", key="opt_apply_single"):
+                    c = _cfg_from_state()
+                    top = rdf.iloc[0]
+                    for k in ostr.OPT_GRIDS[ol]:
+                        c[ol][k] = int(top[k]) if k == "cutoff" else float(top[k])
+                    st.session_state["_opt_pending_cfg"] = c
+                    st.rerun()
+            else:
+                st.warning("No config met the min-trades / min-green thresholds.")
+        elif r and r[0] == "all":
+            _, _, ar = r
+            if ar["best"]:
+                st.markdown("**Best config per leg**")
+                rows = [{"leg": LEG_NAMES[l], **ar["best"][l]} for l in ostr.LEGS if l in ar["best"]]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                if ar.get("port_metrics"):
+                    _metric_cards(ar["port_metrics"], "🎯 Optimized portfolio (all 3 legs, combined)")
+                if st.button("✅ Apply best to all inputs", key="opt_apply_all"):
+                    st.session_state["_opt_pending_cfg"] = ar["cfg"]
+                    st.rerun()
+                st.caption("Save the applied settings in the sidebar → 💾 Save / load settings.")
+            else:
+                st.warning("No leg met the thresholds — lower Min trades / Min green months.")
 
     st.caption("⚠️ Educational research only. Synthetic flat-IV premiums exclude "
                "event-day IV crush and spread blow-ups that hit exactly these days. "

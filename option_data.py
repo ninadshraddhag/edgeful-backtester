@@ -66,23 +66,49 @@ def date_range(u: str) -> tuple[_dt.date | None, _dt.date | None]:
 
 # ─── cached loaders ───────────────────────────────────────────────────────────
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=14)
 def _month(u: str, ym: str) -> pd.DataFrame:
     df = pd.read_parquet(os.path.join(STORE, u, f"{ym}.parquet"))
     df["t_min"] = (df["dt"].dt.hour * 60 + df["dt"].dt.minute).astype("int16")
-    df["d"] = df["dt"].dt.normalize()          # midnight timestamp per row (fast filter)
+    df["d"] = df["dt"].dt.normalize()          # midnight timestamp per row
     return df
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=14)
+def _month_days(u: str, ym: str) -> dict:
+    """{date: chain subframe} for a month, grouped ONCE. Makes day_chain an O(1)
+    dict lookup instead of an O(900k-row) filter — critical for the optimizer,
+    which re-reads every day across many configs."""
+    m = _month(u, ym)
+    return {k.date(): g for k, g in m.groupby("d", sort=True)}
+
+
 def day_chain(u: str, date) -> pd.DataFrame:
     """Whole option chain for one trading day (all expiries/strikes/rights)."""
-    date = pd.Timestamp(date).normalize()
-    ym = f"{date.year:04d}-{date.month:02d}"
+    ts = pd.Timestamp(date)
+    ym = f"{ts.year:04d}-{ts.month:02d}"
     if ym not in _months(u):
         return pd.DataFrame()
-    m = _month(u, ym)
-    return m[m["d"] == date]
+    return _month_days(u, ym).get(ts.date(), pd.DataFrame())
+
+
+@functools.lru_cache(maxsize=500)
+def day_index(u: str, date):
+    """Compact per-day lookup for FAST pricing (the optimizer path): the nearest
+    (front) expiry, its sorted strikes, and {(strike,right): (t_min[], close[])}.
+    Built once per day and cached, so a config sweep is O(log n) per trade rather
+    than re-scanning the chain. None when the day isn't in the store."""
+    ch = day_chain(u, date)
+    if len(ch) == 0:
+        return None
+    exp = pd.Timestamp(sorted(ch["expiry"].unique())[0])
+    sub = ch[ch["expiry"] == exp]
+    strikes = np.sort(sub["strike"].unique()).astype(np.int64)
+    series = {}
+    for (k, r), g in sub.groupby(["strike", "right"], observed=True):
+        g = g.sort_values("t_min")
+        series[(int(k), str(r))] = (g["t_min"].to_numpy(), g["close"].to_numpy(float))
+    return {"exp": exp, "strikes": strikes, "series": series}
 
 
 @functools.lru_cache(maxsize=2)

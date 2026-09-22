@@ -17,6 +17,9 @@ Pure functions, no Streamlit.
 """
 from __future__ import annotations
 
+import json
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -40,6 +43,18 @@ def _prem_at(ser, t_min, side):
         return float(cc[m][0]) if m.any() else None
     m = tt <= t_min
     return float(cc[m][-1]) if m.any() else float(cc[0])
+
+
+def _prem_from_arr(tt, cc, t_min, side):
+    """Premium from presorted (t_min[], close[]) arrays — entry = first at/after,
+    exit = last at/before (else first). None if empty. Used on the optimizer path."""
+    if len(tt) == 0:
+        return None
+    if side == "entry":
+        i = int(np.searchsorted(tt, t_min, side="left"))
+        return float(cc[i]) if i < len(tt) else None
+    i = int(np.searchsorted(tt, t_min, side="right")) - 1
+    return float(cc[i]) if i >= 0 else float(cc[0])
 
 OPEN_T = 9 * 60 + 15
 FLAT_T = 15 * 60 + 15            # square-off 15:15
@@ -115,17 +130,17 @@ def _price_trade(rec, bullish, entry_t, entry_spot, exit_t, exit_spot, cfg):
     if cfg.get("pricing") == "real":
         u = _UND.get(cfg.get("instrument", ""), "NIFTY")
         date = pd.Timestamp(rec["date"]).date()
-        ch = od.day_chain(u, date)
-        if len(ch) == 0:                         # date outside the local option store
+        di = od.day_index(u, date)
+        if di is None:                           # date outside the local option store
             return None
-        exp = od.nearest_expiry(ch, date, 0)
-        K = od.atm_strike(ch, exp, entry_spot) if exp is not None else None
-        if K is None:
-            return None
+        ks = di["strikes"]
+        K = int(ks[int(np.argmin(np.abs(ks.astype(float) - entry_spot)))])   # ATM
         right = "CE" if is_call else "PE"
-        ser = od.leg_series(ch, exp, int(K), right)
-        pe = _prem_at(ser, int(entry_t), "entry")
-        px = _prem_at(ser, int(exit_t), "exit")
+        ser = di["series"].get((K, right))
+        if ser is None:
+            return None
+        pe = _prem_from_arr(ser[0], ser[1], int(entry_t), "entry")
+        px = _prem_from_arr(ser[0], ser[1], int(exit_t), "exit")
         if pe is None or px is None:             # contract didn't trade the window
             return None
         lot = od.LOT_SIZE.get(u, op.LOT_SIZE)
@@ -423,6 +438,66 @@ def optimize_leg(days, base_cfg, leg, rank="exp", min_trades=100,
     return pd.DataFrame(rows).sort_values(col, ascending=False).reset_index(drop=True)
 
 
+def optimize_all(days, base_cfg, rank="exp", min_trades=100, min_green=0, progress=None):
+    """Optimize ALL three legs at once — each swept independently over its grid,
+    then the best config per leg combined into one portfolio cfg. Returns
+    {"cfg": combined, "best": {leg: params+metrics}, "tables": {leg: df}}."""
+    import copy
+    import itertools
+    counts = {l: len(list(itertools.product(*OPT_GRIDS[l].values()))) for l in LEGS}
+    total = sum(counts.values())
+    combined = copy.deepcopy(base_cfg)
+    best, tables, done = {}, {}, [0]
+    for leg in LEGS:
+        def _p(i, n, _b=done[0]):
+            if progress:
+                progress(_b + i, total)
+        rdf = optimize_leg(days, base_cfg, leg, rank=rank, min_trades=min_trades,
+                           min_green=min_green, progress=_p)
+        done[0] += counts[leg]
+        tables[leg] = rdf
+        if len(rdf):
+            top = rdf.iloc[0]
+            params = {}
+            for k in OPT_GRIDS[leg]:
+                v = int(top[k]) if k == "cutoff" else float(top[k])
+                combined[leg][k] = v
+                params[k] = v
+            best[leg] = {**params, "trades": int(top["trades"]), "exp": float(top["exp"]),
+                         "pf": float(top["pf"]), "green_pct": float(top["green_pct"])}
+    return {"cfg": combined, "best": best, "tables": tables}
+
+
+# ─── saved strategy presets (local JSON) ──────────────────────────────────────
+
+PRESET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "analysis", "option_strategy_presets.json")
+
+
+def load_presets() -> dict:
+    if os.path.exists(PRESET_FILE):
+        try:
+            return json.load(open(PRESET_FILE, encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_preset(name: str, cfg: dict) -> dict:
+    d = load_presets()
+    d[str(name)] = cfg
+    os.makedirs(os.path.dirname(PRESET_FILE), exist_ok=True)
+    json.dump(d, open(PRESET_FILE, "w", encoding="utf-8"), indent=2, default=float)
+    return d
+
+
+def delete_preset(name: str) -> dict:
+    d = load_presets()
+    d.pop(str(name), None)
+    json.dump(d, open(PRESET_FILE, "w", encoding="utf-8"), indent=2, default=float)
+    return d
+
+
 # ─── trade-browser support ────────────────────────────────────────────────────
 
 def find_day(days, d):
@@ -444,19 +519,19 @@ def premium_series(rec, trade, cfg):
     if cfg.get("pricing") == "real":
         u = _UND.get(cfg.get("instrument", ""), "NIFTY")
         date = pd.Timestamp(rec["date"]).date()
-        ch = od.day_chain(u, date)
-        exp = od.nearest_expiry(ch, date, 0) if len(ch) else None
-        if exp is None:
-            return pd.DataFrame()
+        di = od.day_index(u, date)
         right = "CE" if is_call else "PE"
-        ser = od.leg_series(ch, exp, int(K), right)
-        ser = ser[(ser["t_min"] >= trade["entry_t"]) & (ser["t_min"] <= trade["exit_t"])]
-        if len(ser) == 0:
+        ser = di["series"].get((int(K), right)) if di else None
+        if ser is None:
+            return pd.DataFrame()
+        tt, cc = ser
+        m = (tt >= trade["entry_t"]) & (tt <= trade["exit_t"])
+        if not m.any():
             return pd.DataFrame()
         tmap = dict(zip(rec["t"].tolist(), rec["cl"].tolist()))
-        tt = ser["t_min"].to_numpy()
-        return pd.DataFrame({"t_min": tt, "spot": [tmap.get(int(x), np.nan) for x in tt],
-                             "premium": ser["close"].round(2).to_numpy()})
+        ttm = tt[m]
+        return pd.DataFrame({"t_min": ttm, "spot": [tmap.get(int(x), np.nan) for x in ttm],
+                             "premium": np.round(cc[m], 2)})
     e_i = _idx_at(rec, trade["entry_t"])
     x_i = _idx_at(rec, trade["exit_t"])
     if e_i is None:
