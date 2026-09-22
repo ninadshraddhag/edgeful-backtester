@@ -19,6 +19,9 @@ import build_facts
 import data_store
 import option_strategy as ostr
 import options_pricing as op
+import option_data as od          # real NSE chain (for the Synthetic/Real toggle)
+
+_UND = {"NIFTY 50": "NIFTY", "BANK NIFTY": "BANKNIFTY"}
 
 HERE_PATHS = {"NIFTY 50": None, "BANK NIFTY": None}
 LEG_NAMES = {"T1": "T1 · Trend-Ride", "GF": "GF · Gap-Fade", "ORB": "ORB · IB breakout"}
@@ -47,6 +50,8 @@ def _cfg_from_state() -> dict:
                      target_buf_pct=s["opt_GF_buf"], stop_pct=s["opt_GF_stop"])
     cfg["ORB"].update(stop_cap_pct=s["opt_ORB_cap"], trail_pct=s["opt_ORB_trail"],
                       cutoff=s["opt_ORB_cut"] * 60, use_vwap=s["opt_ORB_vwap"])
+    cfg["instrument"] = s.get("opt_inst", "NIFTY 50")
+    cfg["pricing"] = "real" if str(s.get("opt_pricing", "")).startswith("Real") else "synthetic"
     return cfg
 
 
@@ -170,10 +175,9 @@ def _trade_browser(days, port, cfg):
 
 def render():
     st.title("🎯 NIFTY Option Strategy")
-    st.caption("Three diversified intraday legs · long the ATM option · 1 lot · "
-               "flat 15:15 · stops in % of PDC. Synthetic Black-Scholes premiums "
-               "(flat IV) — not live option data; numbers are a faithful model, "
-               "not a promise.")
+    st.caption("Three diversified intraday legs · long the ATM option (pure option "
+               "buying) · 1 lot · flat 15:15 · stops in % of PDC. Pick **Synthetic "
+               "(Black-Scholes)** or **Real NSE chain** premiums in the sidebar.")
 
     # ── sidebar ────────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -182,6 +186,21 @@ def render():
         instrument = st.selectbox("Instrument", insts, key="opt_inst")
         mpath = data_store.discover()[instrument]
         mtime = os.path.getmtime(mpath)
+
+        real_ok = _UND.get(instrument) in od.available()
+        src_opts = ["Synthetic (Black-Scholes)"] + (["Real NSE chain"] if real_ok else [])
+        pricing_label = st.radio(
+            "Premium data", src_opts, key="opt_pricing",
+            help="Synthetic = flat-IV Black-Scholes model (works on any date). "
+                 "Real = actual traded NSE option premiums from the local chain "
+                 "store (NIFTY/BANKNIFTY, Jan 2020 – Oct 2024).")
+        if not real_ok:
+            st.caption("ℹ Real NSE chain: build the local store "
+                       "(`python build_options_store.py`) to enable real premiums.")
+        elif pricing_label == "Real NSE chain":
+            lo, hi = od.date_range(_UND[instrument])
+            st.caption(f"✅ Real premiums · {_UND[instrument]} chain {lo} → {hi}. "
+                       "Days outside this range are skipped.")
 
         st.caption("Long the ATM option in the trade direction (1 lot).")
         st.slider("Flat IV %", 6.0, 30.0, 13.0, 0.5, key="opt_iv")

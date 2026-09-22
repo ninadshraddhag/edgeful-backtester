@@ -22,6 +22,24 @@ import pandas as pd
 
 import build_facts
 import options_pricing as op
+import option_data as od          # real NSE chain (optional; used when cfg["pricing"]=="real")
+
+_UND = {"NIFTY 50": "NIFTY", "BANK NIFTY": "BANKNIFTY"}
+
+
+def _prem_at(ser, t_min, side):
+    """Real premium from a contract's 1-min series: entry = first bar at/after
+    t_min; exit = last bar at/before t_min (last print if squared off past it).
+    None when the contract has no usable bar."""
+    if len(ser) == 0:
+        return None
+    tt = ser["t_min"].to_numpy()
+    cc = ser["close"].to_numpy(float)
+    if side == "entry":
+        m = tt >= t_min
+        return float(cc[m][0]) if m.any() else None
+    m = tt <= t_min
+    return float(cc[m][-1]) if m.any() else float(cc[0])
 
 OPEN_T = 9 * 60 + 15
 FLAT_T = 15 * 60 + 15            # square-off 15:15
@@ -89,22 +107,43 @@ def prep_days(mdf: pd.DataFrame):
 # ─── option P&L for one resolved trade ────────────────────────────────────────
 
 def _price_trade(rec, bullish, entry_t, entry_spot, exit_t, exit_spot, cfg):
-    """Turn a resolved spot trade into a LONG ATM option P&L (₹, all costs)."""
-    iv = cfg["iv"]
-    dt_e = rec["date"] + pd.Timedelta(minutes=int(entry_t))
-    dt_x = rec["date"] + pd.Timedelta(minutes=int(exit_t))
-    Te, Tx = op.tte_years(dt_e), op.tte_years(dt_x)
-
+    """Turn a resolved spot trade into a LONG ATM option P&L (₹, all costs).
+    cfg["pricing"]=="real" prices from the real NSE chain (returns None when the
+    day/contract isn't in the local store); otherwise synthetic Black-Scholes."""
     is_call = bullish                            # long the option in trade direction
-    K = op.atm_strike(entry_spot)
-    pe = float(op.bs_price(entry_spot, K, Te, iv, is_call))
-    px = float(op.bs_price(exit_spot, K, Tx, iv, is_call))
-    pts = px - pe                                # long
 
+    if cfg.get("pricing") == "real":
+        u = _UND.get(cfg.get("instrument", ""), "NIFTY")
+        date = pd.Timestamp(rec["date"]).date()
+        ch = od.day_chain(u, date)
+        if len(ch) == 0:                         # date outside the local option store
+            return None
+        exp = od.nearest_expiry(ch, date, 0)
+        K = od.atm_strike(ch, exp, entry_spot) if exp is not None else None
+        if K is None:
+            return None
+        right = "CE" if is_call else "PE"
+        ser = od.leg_series(ch, exp, int(K), right)
+        pe = _prem_at(ser, int(entry_t), "entry")
+        px = _prem_at(ser, int(exit_t), "exit")
+        if pe is None or px is None:             # contract didn't trade the window
+            return None
+        lot = od.LOT_SIZE.get(u, op.LOT_SIZE)
+    else:
+        iv = cfg["iv"]
+        dt_e = rec["date"] + pd.Timedelta(minutes=int(entry_t))
+        dt_x = rec["date"] + pd.Timedelta(minutes=int(exit_t))
+        Te, Tx = op.tte_years(dt_e), op.tte_years(dt_x)
+        K = op.atm_strike(entry_spot)
+        pe = float(op.bs_price(entry_spot, K, Te, iv, is_call))
+        px = float(op.bs_price(exit_spot, K, Tx, iv, is_call))
+        lot = op.LOT_SIZE
+
+    pts = px - pe                                # long
     cost = op.round_trip_cost(pe, px, cfg["lots"], cfg["slippage_pts"],
                               cfg["brokerage"], cfg["cost_mult"], cfg["slip_mult"])
-    pnl = pts * op.LOT_SIZE * cfg["lots"] - cost
-    return dict(strike=K, opt="+" + ("CE" if is_call else "PE"),
+    pnl = pts * lot * cfg["lots"] - cost
+    return dict(strike=int(K), opt="+" + ("CE" if is_call else "PE"),
                 entry_prem=round(pe, 2), exit_prem=round(px, 2),
                 points=round(pts, 2), cost=round(cost, 1), pnl=round(pnl, 1))
 
@@ -165,6 +204,8 @@ def leg_T1(rec, cfg):
         stop = (px - c["stop_pct"] / 100 * pdc) if bull else (px + c["stop_pct"] / 100 * pdc)
         xt, xs, why = _walk_exit(rec, i0, bull, stop, c["trail_pct"] / 100 * pdc)
         tr = _price_trade(rec, bull, tb, px, xt, xs, cfg)
+        if tr is None:
+            return None
         tr.update(date=rec["date"], dow=rec["dow"], leg="T1",
                   dir="bull" if bull else "bear", entry_t=int(tb),
                   entry_spot=round(px, 1), exit_t=xt, exit_spot=round(xs, 1),
@@ -190,6 +231,8 @@ def leg_GF(rec, cfg):
         target = pdc - buf; stop = spot - c["stop_pct"] / 100 * pdc
     xt, xs, why = _walk_exit(rec, i0, bull, stop, None, target_lvl=target)
     tr = _price_trade(rec, bull, c["enter_t"], spot, xt, xs, cfg)
+    if tr is None:
+        return None
     tr.update(date=rec["date"], dow=rec["dow"], leg="GF",
               dir="bull" if bull else "bear", entry_t=int(c["enter_t"]),
               entry_spot=round(spot, 1), exit_t=xt, exit_spot=round(xs, 1),
@@ -219,6 +262,8 @@ def leg_ORB(rec, cfg):
             stop = min(rec["ib_hi"], px + cap)
         xt, xs, why = _walk_exit(rec, i0, bull, stop, c["trail_pct"] / 100 * pdc)
         tr = _price_trade(rec, bull, tb, px, xt, xs, cfg)
+        if tr is None:
+            return None
         tr.update(date=rec["date"], dow=rec["dow"], leg="ORB",
                   dir="bull" if bull else "bear", entry_t=int(tb),
                   entry_spot=round(px, 1), exit_t=xt, exit_spot=round(xs, 1),
@@ -396,6 +441,22 @@ def premium_series(rec, trade, cfg):
     """
     is_call = (trade["opt"][-2:] == "CE")
     K = trade["strike"]
+    if cfg.get("pricing") == "real":
+        u = _UND.get(cfg.get("instrument", ""), "NIFTY")
+        date = pd.Timestamp(rec["date"]).date()
+        ch = od.day_chain(u, date)
+        exp = od.nearest_expiry(ch, date, 0) if len(ch) else None
+        if exp is None:
+            return pd.DataFrame()
+        right = "CE" if is_call else "PE"
+        ser = od.leg_series(ch, exp, int(K), right)
+        ser = ser[(ser["t_min"] >= trade["entry_t"]) & (ser["t_min"] <= trade["exit_t"])]
+        if len(ser) == 0:
+            return pd.DataFrame()
+        tmap = dict(zip(rec["t"].tolist(), rec["cl"].tolist()))
+        tt = ser["t_min"].to_numpy()
+        return pd.DataFrame({"t_min": tt, "spot": [tmap.get(int(x), np.nan) for x in tt],
+                             "premium": ser["close"].round(2).to_numpy()})
     e_i = _idx_at(rec, trade["entry_t"])
     x_i = _idx_at(rec, trade["exit_t"])
     if e_i is None:
